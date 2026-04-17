@@ -59,6 +59,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --all-features --no-deps
 
+  bench-compile:
+    name: cargo bench --no-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo bench --all-features --no-run
+
+  examples:
+    name: cargo build --examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --examples --all-features
+
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
