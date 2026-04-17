@@ -13,17 +13,6 @@ the AWS reference (`feature_dim`, `num_trees`, `num_samples_per_tree`).
 > Track the [`rcf-rs` epic](../_bmad-output/implementation-artifacts/epic-rcf-rs.md)
 > for progress.
 
-## Why this crate
-
-| Property | `rcf-rs` | [`krcf`](https://crates.io/crates/krcf) | AWS Java port |
-|---|---|---|---|
-| Pure Rust | ✅ | partial (wraps AWS code) | ❌ |
-| `#![forbid(unsafe_code)]` | ✅ | ❌ | n/a |
-| Lines of code | ~1.7k | ~11k | ~11k |
-| Native `serde` persistence | ✅ (feature-gated) | ❌ | ❌ |
-| AWS SageMaker spec conformant | ✅ | partial | ✅ (reference) |
-| Idiomatic Rust API | ✅ | Java-isms | n/a |
-
 ## Quickstart
 
 ```rust,ignore
