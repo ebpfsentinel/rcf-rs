@@ -13,6 +13,8 @@
 
 pub mod node;
 pub mod node_store;
+pub mod random_cut_tree;
 
 pub use node::{Node, NodeRef};
 pub use node_store::NodeStore;
+pub use random_cut_tree::{PointAccessor, RandomCutTree};

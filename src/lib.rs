@@ -96,7 +96,9 @@
 pub mod domain;
 pub mod error;
 pub mod tree;
+pub mod visitor;
 
 pub use domain::{AnomalyScore, BoundingBox, Cut, DiVector, Point};
 pub use error::{RcfError, RcfResult};
-pub use tree::{Node, NodeRef, NodeStore};
+pub use tree::{Node, NodeRef, NodeStore, PointAccessor, RandomCutTree};
+pub use visitor::Visitor;
