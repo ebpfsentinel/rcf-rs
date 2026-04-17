@@ -18,6 +18,7 @@
 //! [`per_dim_cut_probabilities`]: BoundingBox::per_dim_cut_probabilities
 
 use smallvec::SmallVec;
+use wide::f64x4;
 
 use crate::domain::cut::Cut;
 use crate::domain::point::ensure_dim;
@@ -95,15 +96,37 @@ impl BoundingBox {
     /// Sum of per-dimension ranges (`Σ_d (max_d − min_d)`).
     ///
     /// This is the denominator used by [`Cut::random_cut`] to pick a
-    /// dimension weighted by its range.
+    /// dimension weighted by its range. Vectorised in 4-lane f64
+    /// chunks via [`wide::f64x4`] for the AWS-default `dim = 16`
+    /// hot path; a scalar tail handles dims that are not a multiple
+    /// of 4.
     ///
     /// [`Cut::random_cut`]: crate::domain::Cut::random_cut
     #[must_use]
     #[inline]
     pub fn range_sum(&self) -> f64 {
-        let mut s = 0.0;
-        for d in 0..self.dim() {
-            s += self.range_at(d);
+        let len = self.dim();
+        let mut acc_simd = f64x4::splat(0.0);
+        let chunks = len / 4;
+        for i in 0..chunks {
+            let off = i * 4;
+            let mn = f64x4::from([
+                self.min[off],
+                self.min[off + 1],
+                self.min[off + 2],
+                self.min[off + 3],
+            ]);
+            let mx = f64x4::from([
+                self.max[off],
+                self.max[off + 1],
+                self.max[off + 2],
+                self.max[off + 3],
+            ]);
+            acc_simd += mx - mn;
+        }
+        let mut s = acc_simd.reduce_add();
+        for d in (chunks * 4)..len {
+            s += self.max[d] - self.min[d];
         }
         s
     }
@@ -269,10 +292,37 @@ impl BoundingBox {
     #[inline]
     #[must_use]
     pub fn augmented_range_sum(&self, point: &[f64]) -> f64 {
-        let mut s = 0.0_f64;
-        for ((&p, &min), &max) in point.iter().zip(self.min.iter()).zip(self.max.iter()) {
-            let lo = min.min(p);
-            let hi = max.max(p);
+        let len = self.dim().min(point.len());
+        let chunks = len / 4;
+        let mut acc_simd = f64x4::splat(0.0);
+        for i in 0..chunks {
+            let off = i * 4;
+            let p = f64x4::from([point[off], point[off + 1], point[off + 2], point[off + 3]]);
+            let mn = f64x4::from([
+                self.min[off],
+                self.min[off + 1],
+                self.min[off + 2],
+                self.min[off + 3],
+            ]);
+            let mx = f64x4::from([
+                self.max[off],
+                self.max[off + 1],
+                self.max[off + 2],
+                self.max[off + 3],
+            ]);
+            let lo = mn.fast_min(p);
+            let hi = mx.fast_max(p);
+            acc_simd += hi - lo;
+        }
+        let mut s = acc_simd.reduce_add();
+        let tail_start = chunks * 4;
+        for ((&p, &mn), &mx) in point[tail_start..len]
+            .iter()
+            .zip(self.min[tail_start..len].iter())
+            .zip(self.max[tail_start..len].iter())
+        {
+            let lo = mn.min(p);
+            let hi = mx.max(p);
             s += hi - lo;
         }
         s
@@ -328,10 +378,40 @@ impl BoundingBox {
     pub fn total_probability_of_cut(&self, point: &[f64]) -> RcfResult<f64> {
         ensure_dim(point, self.dim())?;
         let range_sum = self.range_sum();
-        let mut extension_sum = 0.0_f64;
-        for ((&p, &min), &max) in point.iter().zip(self.min.iter()).zip(self.max.iter()) {
-            let above = p - max;
-            let below = min - p;
+        let len = self.dim();
+        let chunks = len / 4;
+        let zero = f64x4::splat(0.0);
+        let mut acc_simd = f64x4::splat(0.0);
+        for i in 0..chunks {
+            let off = i * 4;
+            let p = f64x4::from([point[off], point[off + 1], point[off + 2], point[off + 3]]);
+            let mn = f64x4::from([
+                self.min[off],
+                self.min[off + 1],
+                self.min[off + 2],
+                self.min[off + 3],
+            ]);
+            let mx = f64x4::from([
+                self.max[off],
+                self.max[off + 1],
+                self.max[off + 2],
+                self.max[off + 3],
+            ]);
+            // Branchless `max(0, x)` via `fast_max(x, 0)` — wide
+            // turns this into a single SIMD `maxpd`.
+            let above = (p - mx).fast_max(zero);
+            let below = (mn - p).fast_max(zero);
+            acc_simd += above + below;
+        }
+        let mut extension_sum = acc_simd.reduce_add();
+        let tail_start = chunks * 4;
+        for ((&p, &mn), &mx) in point[tail_start..len]
+            .iter()
+            .zip(self.min[tail_start..len].iter())
+            .zip(self.max[tail_start..len].iter())
+        {
+            let above = p - mx;
+            let below = mn - p;
             if above > 0.0 {
                 extension_sum += above;
             }
