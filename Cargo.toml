@@ -28,6 +28,8 @@ serde_json = ["dep:serde_json", "serde"]
 
 [dependencies]
 thiserror = "2"
+rand = { version = "0.9", default-features = false, features = ["std", "std_rng"] }
+rand_chacha = { version = "0.9", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 

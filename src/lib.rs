@@ -92,3 +92,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
+
+pub mod domain;
+pub mod error;
+
+pub use domain::{AnomalyScore, BoundingBox, Cut, DiVector, Point};
+pub use error::{RcfError, RcfResult};
