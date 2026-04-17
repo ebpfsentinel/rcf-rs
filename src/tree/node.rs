@@ -54,18 +54,21 @@ impl NodeRef {
 
     /// Whether this reference points to a leaf.
     #[must_use]
+    #[inline]
     pub fn is_leaf(self) -> bool {
         self.0 & Self::LEAF_BIT != 0
     }
 
     /// Whether this reference points to an internal node.
     #[must_use]
+    #[inline]
     pub fn is_internal(self) -> bool {
         !self.is_leaf()
     }
 
     /// Slot index in the corresponding storage arena.
     #[must_use]
+    #[inline]
     pub fn index(self) -> usize {
         (self.0 & Self::INDEX_MASK) as usize
     }
@@ -75,6 +78,7 @@ impl NodeRef {
     ///
     /// [`NodeStore`]: crate::tree::NodeStore
     #[must_use]
+    #[inline]
     pub(crate) fn raw(self) -> u32 {
         self.0
     }
@@ -122,6 +126,7 @@ impl Node {
     /// Mass of the node (leaf count for internals, copy count for
     /// leaves).
     #[must_use]
+    #[inline]
     pub fn mass(&self) -> u64 {
         match self {
             Self::Internal { mass, .. } | Self::Leaf { mass, .. } => *mass,
@@ -130,6 +135,7 @@ impl Node {
 
     /// Parent reference (`None` only for the root).
     #[must_use]
+    #[inline]
     pub fn parent(&self) -> Option<NodeRef> {
         match self {
             Self::Internal { parent, .. } | Self::Leaf { parent, .. } => *parent,
@@ -138,12 +144,14 @@ impl Node {
 
     /// Whether this is an internal node.
     #[must_use]
+    #[inline]
     pub fn is_internal(&self) -> bool {
         matches!(self, Self::Internal { .. })
     }
 
     /// Whether this is a leaf.
     #[must_use]
+    #[inline]
     pub fn is_leaf(&self) -> bool {
         matches!(self, Self::Leaf { .. })
     }

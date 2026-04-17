@@ -35,12 +35,14 @@ impl Cut {
 
     /// Cut dimension.
     #[must_use]
+    #[inline]
     pub fn dim(&self) -> usize {
         self.dim
     }
 
     /// Cut coordinate.
     #[must_use]
+    #[inline]
     pub fn value(&self) -> f64 {
         self.value
     }
@@ -57,6 +59,7 @@ impl Cut {
     /// size-check the point first via
     /// [`crate::domain::ensure_dim`].
     #[must_use]
+    #[inline]
     pub fn left_of(&self, point: &[f64]) -> bool {
         point[self.dim] <= self.value
     }

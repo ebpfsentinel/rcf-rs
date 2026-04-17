@@ -17,6 +17,7 @@
 //! [`probability_of_cut`]: BoundingBox::probability_of_cut
 //! [`per_dim_cut_probabilities`]: BoundingBox::per_dim_cut_probabilities
 
+use crate::domain::cut::Cut;
 use crate::domain::point::ensure_dim;
 use crate::error::{RcfError, RcfResult};
 
@@ -48,18 +49,21 @@ impl BoundingBox {
 
     /// Dimensionality of the box.
     #[must_use]
+    #[inline]
     pub fn dim(&self) -> usize {
         self.min.len()
     }
 
     /// Per-dimension lower corner.
     #[must_use]
+    #[inline]
     pub fn min(&self) -> &[f64] {
         &self.min
     }
 
     /// Per-dimension upper corner.
     #[must_use]
+    #[inline]
     pub fn max(&self) -> &[f64] {
         &self.max
     }
@@ -71,6 +75,7 @@ impl BoundingBox {
     /// Panics when `d >= self.dim()` — call sites are internal and
     /// always size-checked.
     #[must_use]
+    #[inline]
     pub fn range_at(&self, d: usize) -> f64 {
         self.max[d] - self.min[d]
     }
@@ -82,6 +87,7 @@ impl BoundingBox {
     ///
     /// [`Cut::random_cut`]: crate::domain::Cut::random_cut
     #[must_use]
+    #[inline]
     pub fn range_sum(&self) -> f64 {
         let mut s = 0.0;
         for d in 0..self.dim() {
@@ -220,6 +226,84 @@ impl BoundingBox {
     /// Returns [`RcfError::DimensionMismatch`] when `point.len() != self.dim()`.
     pub fn per_dim_cut_probabilities(&self, point: &[f64]) -> RcfResult<Vec<f64>> {
         Ok(self.probability_of_cut(point)?.1)
+    }
+
+    /// Per-dimension range of the bounding box augmented by `point`
+    /// without materialising a fresh [`BoundingBox`]. Used by the
+    /// tree insertion hot path to avoid the `clone()`-then-`extend()`
+    /// roundtrip on every recursion level.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds when `d >= self.dim()` or
+    /// `point.len() != self.dim()`. Internal callers always
+    /// size-check first.
+    #[inline]
+    #[must_use]
+    pub fn augmented_range_at(&self, d: usize, point: &[f64]) -> f64 {
+        let lo = self.min[d].min(point[d]);
+        let hi = self.max[d].max(point[d]);
+        hi - lo
+    }
+
+    /// Sum of [`augmented_range_at`](Self::augmented_range_at) over
+    /// every dimension. Equivalent to
+    /// `self.merged(BoundingBox::from_point(point)?).range_sum()`
+    /// without the allocation.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds when `point.len() != self.dim()`.
+    #[inline]
+    #[must_use]
+    pub fn augmented_range_sum(&self, point: &[f64]) -> f64 {
+        let mut s = 0.0_f64;
+        for ((&p, &min), &max) in point.iter().zip(self.min.iter()).zip(self.max.iter()) {
+            let lo = min.min(p);
+            let hi = max.max(p);
+            s += hi - lo;
+        }
+        s
+    }
+
+    /// Sample a random cut over the bounding box augmented by
+    /// `point` without materialising the augmented box. Mirrors
+    /// [`Cut::random_cut`] semantics on the augmented box.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RcfError::EmptyBoundingBox`] when every per-dim
+    /// range of the augmented box is zero (point coincides with the
+    /// subtree's only point).
+    #[inline]
+    pub fn augmented_random_cut<R: rand::RngCore + ?Sized>(
+        &self,
+        point: &[f64],
+        rng: &mut R,
+    ) -> RcfResult<Cut> {
+        let total = self.augmented_range_sum(point);
+        if total <= 0.0 {
+            return Err(RcfError::EmptyBoundingBox);
+        }
+        let mut target = rand::Rng::random::<f64>(rng) * total;
+        let mut chosen = 0_usize;
+        for d in 0..self.dim() {
+            let r = self.augmented_range_at(d, point);
+            if target < r {
+                chosen = d;
+                break;
+            }
+            target -= r;
+            chosen = d;
+        }
+        let lo = self.min[chosen].min(point[chosen]);
+        let hi = self.max[chosen].max(point[chosen]);
+        let value = if (hi - lo).abs() < f64::EPSILON {
+            lo
+        } else {
+            lo + rand::Rng::random::<f64>(rng) * (hi - lo)
+        };
+        Ok(Cut::new(chosen, value))
     }
 
     /// Total cut probability without allocating the per-dim breakdown

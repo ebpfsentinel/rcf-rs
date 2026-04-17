@@ -20,7 +20,6 @@
 //! needs to know a leaf's location.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 
 use rand::RngCore;
 
@@ -62,7 +61,13 @@ pub struct RandomCutTree {
     /// Dimensionality enforced by `add` / `traverse`.
     dimension: usize,
     /// Reverse index: `point_idx → leaf NodeRef` for `O(1)` deletions.
-    leaf_index: HashMap<usize, NodeRef>,
+    /// Backed by a sparse `Vec<Option<NodeRef>>` indexed by `point_idx`
+    /// — the forest's `PointStore` reuses freed slots so the indices
+    /// stay dense in steady state. Maintained alongside
+    /// `distinct_count` so `distinct_point_count` stays `O(1)`.
+    leaf_index: Vec<Option<NodeRef>>,
+    /// Cached count of `Some` entries in `leaf_index`.
+    distinct_count: usize,
 }
 
 impl RandomCutTree {
@@ -82,8 +87,50 @@ impl RandomCutTree {
             root: None,
             store: NodeStore::new(capacity)?,
             dimension,
-            leaf_index: HashMap::new(),
+            leaf_index: Vec::new(),
+            distinct_count: 0,
         })
+    }
+
+    /// Insert (or overwrite) `leaf_index[idx] = Some(node)`,
+    /// updating [`distinct_count`](Self::distinct_point_count). Grows
+    /// the backing `Vec` on demand.
+    #[inline]
+    fn leaf_index_set(&mut self, idx: usize, node: NodeRef) {
+        if idx >= self.leaf_index.len() {
+            self.leaf_index.resize(idx + 1, None);
+        }
+        if self.leaf_index[idx].is_none() {
+            self.distinct_count += 1;
+        }
+        self.leaf_index[idx] = Some(node);
+    }
+
+    /// Clear `leaf_index[idx]` if present, decrementing
+    /// [`distinct_count`](Self::distinct_point_count). No-op when
+    /// `idx` is out of range or already `None`.
+    #[inline]
+    fn leaf_index_clear(&mut self, idx: usize) {
+        if let Some(slot) = self.leaf_index.get_mut(idx)
+            && slot.is_some()
+        {
+            *slot = None;
+            self.distinct_count -= 1;
+        }
+    }
+
+    /// `Some(node_ref)` when `point_idx` is currently mapped.
+    #[inline]
+    #[must_use]
+    fn leaf_index_get(&self, idx: usize) -> Option<NodeRef> {
+        self.leaf_index.get(idx).copied().flatten()
+    }
+
+    /// Whether `point_idx` is currently mapped — `O(1)` `Vec` index.
+    #[inline]
+    #[must_use]
+    fn leaf_index_contains(&self, idx: usize) -> bool {
+        matches!(self.leaf_index.get(idx), Some(Some(_)))
     }
 
     /// Root node reference, or `None` when the tree is empty.
@@ -101,8 +148,9 @@ impl RandomCutTree {
     /// Number of distinct points currently stored (each leaf counts
     /// once regardless of its mass).
     #[must_use]
+    #[inline]
     pub fn distinct_point_count(&self) -> usize {
-        self.leaf_index.len()
+        self.distinct_count
     }
 
     /// Borrow the underlying node store. Used by tests and
@@ -114,8 +162,9 @@ impl RandomCutTree {
 
     /// Whether the tree currently stores `point_idx`.
     #[must_use]
+    #[inline]
     pub fn contains(&self, point_idx: usize) -> bool {
-        self.leaf_index.contains_key(&point_idx)
+        self.leaf_index_contains(point_idx)
     }
 
     /// Maximum depth from the root to any leaf, or `None` when the
@@ -166,7 +215,7 @@ impl RandomCutTree {
     {
         ensure_dim(point, self.dimension)?;
         ensure_finite(point)?;
-        if self.leaf_index.contains_key(&point_idx) {
+        if self.leaf_index_contains(point_idx) {
             return Err(RcfError::InvalidConfig(format!(
                 "RandomCutTree::add: point_idx {point_idx} already present"
             )));
@@ -174,7 +223,7 @@ impl RandomCutTree {
 
         let Some(root) = self.root else {
             let leaf = self.store.add_leaf(point_idx, None, 1)?;
-            self.leaf_index.insert(point_idx, leaf);
+            self.leaf_index_set(point_idx, leaf);
             self.root = Some(leaf);
             return Ok(());
         };
@@ -198,26 +247,29 @@ impl RandomCutTree {
         P: PointAccessor + ?Sized,
     {
         let n_bbox = self.bbox_of(n, points)?;
-        // `augmented` is a fresh owned bbox — clone the borrowed
-        // cached one (single allocation per recursion level instead
-        // of two when bbox_of also returned an owned clone).
-        let mut augmented: BoundingBox = (*n_bbox).clone();
-        augmented.extend(point)?;
 
-        if augmented.range_sum() <= 0.0 {
+        // Sample over the *virtual* augmented bbox — no allocation
+        // unless we end up materialising the cached bbox for the
+        // splice path below.
+        if n_bbox.augmented_range_sum(point) <= 0.0 {
             // Coincident with an existing leaf — bump its mass.
+            drop(n_bbox);
             return self.absorb_duplicate(n, point_idx);
         }
 
-        let cut = Cut::random_cut(&augmented, rng)?;
+        let cut = n_bbox.augmented_random_cut(point, rng)?;
         let isolates = isolates_point(&cut, point, &n_bbox);
-        // Drop the borrow on `self` held by `n_bbox` before any
-        // mutating helper runs.
-        drop(n_bbox);
 
         if isolates {
+            // Materialise the augmented bbox once — it becomes the
+            // cached bbox of the new internal node we are about to
+            // splice in (so the allocation is unavoidable here).
+            let mut augmented: BoundingBox = (*n_bbox).clone();
+            drop(n_bbox);
+            augmented.extend(point)?;
             self.splice_new_internal(n, point_idx, point, cut, augmented)
         } else {
+            drop(n_bbox);
             self.descend_or_split(n, point_idx, point, points, rng)
         }
     }
@@ -232,7 +284,7 @@ impl RandomCutTree {
         }
         let mass = self.store.node(n)?.mass();
         self.store.set_mass(n, mass + 1)?;
-        self.leaf_index.insert(point_idx, n);
+        self.leaf_index_set(point_idx, n);
         let mut cur = n;
         while let Some(parent) = self.store.parent(cur)? {
             let m = self.store.node(parent)?.mass();
@@ -253,7 +305,7 @@ impl RandomCutTree {
         bbox: BoundingBox,
     ) -> RcfResult<NodeRef> {
         let new_leaf = self.store.add_leaf(point_idx, None, 1)?;
-        self.leaf_index.insert(point_idx, new_leaf);
+        self.leaf_index_set(point_idx, new_leaf);
 
         let parent_of_n = self.store.parent(n)?;
         let n_mass = self.store.node(n)?.mass();
@@ -399,7 +451,7 @@ impl RandomCutTree {
     where
         P: PointAccessor + ?Sized,
     {
-        let leaf = self.leaf_index.get(&point_idx).copied().ok_or_else(|| {
+        let leaf = self.leaf_index_get(point_idx).ok_or_else(|| {
             RcfError::InvalidConfig(format!(
                 "RandomCutTree::delete: point_idx {point_idx} not present"
             ))
@@ -417,13 +469,13 @@ impl RandomCutTree {
             // Drop this idx from the reverse index — the leaf still
             // represents the other copies of the point under their own
             // point_idx, but `point_idx` itself is gone.
-            self.leaf_index.remove(&point_idx);
+            self.leaf_index_clear(point_idx);
             return Ok(());
         }
 
         // mass == 1: remove the leaf entirely.
         let parent_of_leaf = self.store.parent(leaf)?;
-        self.leaf_index.remove(&point_idx);
+        self.leaf_index_clear(point_idx);
         self.store.delete(leaf)?;
 
         let Some(parent) = parent_of_leaf else {
@@ -595,6 +647,7 @@ impl RandomCutTree {
 
 /// Whether `cut` strictly isolates `point` from `n_bbox` (i.e. `point`
 /// ends up alone on one side of the hyperplane).
+#[inline]
 fn isolates_point(cut: &Cut, point: &[f64], n_bbox: &BoundingBox) -> bool {
     let d = cut.dim();
     let v = cut.value();
