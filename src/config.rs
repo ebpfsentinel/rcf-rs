@@ -42,6 +42,13 @@ pub struct RcfConfig {
     pub time_decay: f64,
     /// Optional deterministic seed; `None` falls back to entropy.
     pub seed: Option<u64>,
+    /// Optional dedicated rayon thread pool size for the `parallel`
+    /// cargo feature. `None` means "use rayon's global pool"
+    /// (configurable via the `RAYON_NUM_THREADS` env var). `Some(n)`
+    /// builds a per-forest [`rayon::ThreadPool`] of `n` workers so
+    /// callers can isolate this forest from the rest of the
+    /// application's rayon workload. Ignored without `parallel`.
+    pub num_threads: Option<usize>,
 }
 
 impl RcfConfig {
@@ -76,6 +83,14 @@ impl RcfConfig {
                 "time_decay {} out of [0.0, 1.0]",
                 self.time_decay
             )));
+        }
+        if let Some(n) = self.num_threads
+            && n == 0
+        {
+            return Err(RcfError::InvalidConfig(
+                "num_threads must be > 0 when set; use None to fall back to rayon's global pool"
+                    .into(),
+            ));
         }
         Ok(())
     }
@@ -117,6 +132,7 @@ impl ForestBuilder {
                 sample_size: DEFAULT_SAMPLE_SIZE,
                 time_decay: DEFAULT_TIME_DECAY,
                 seed: None,
+                num_threads: None,
             },
         }
     }
@@ -149,6 +165,16 @@ impl ForestBuilder {
         self
     }
 
+    /// Build a dedicated rayon thread pool of size `n` for this
+    /// forest's parallel score / attribution / update paths.
+    /// Requires the `parallel` cargo feature. When unset (default)
+    /// rayon's global pool is used.
+    #[must_use]
+    pub fn num_threads(mut self, n: usize) -> Self {
+        self.config.num_threads = Some(n);
+        self
+    }
+
     /// Read-only access to the config under construction.
     #[must_use]
     pub fn config(&self) -> &RcfConfig {
@@ -178,6 +204,7 @@ mod tests {
             sample_size: s,
             time_decay: td,
             seed: None,
+            num_threads: None,
         }
     }
 
@@ -256,6 +283,36 @@ mod tests {
     fn validate_rejects_non_finite_time_decay() {
         assert!(cfg(4, 100, 256, f64::NAN).validate().is_err());
         assert!(cfg(4, 100, 256, f64::INFINITY).validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_num_threads() {
+        let mut c = cfg(4, 100, 256, 0.0);
+        c.num_threads = Some(0);
+        assert!(matches!(
+            c.validate().unwrap_err(),
+            RcfError::InvalidConfig(_)
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_some_num_threads() {
+        let mut c = cfg(4, 100, 256, 0.0);
+        c.num_threads = Some(4);
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_accepts_default_num_threads_none() {
+        let c = cfg(4, 100, 256, 0.0);
+        assert_eq!(c.num_threads, None);
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn builder_num_threads_sets_field() {
+        let b = ForestBuilder::new(4).num_threads(8);
+        assert_eq!(b.config().num_threads, Some(8));
     }
 
     #[test]

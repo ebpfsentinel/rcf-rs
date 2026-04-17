@@ -45,6 +45,15 @@ pub struct RandomCutForest {
     point_store: PointStore,
     /// Total number of `update` calls observed.
     updates_seen: u64,
+    /// Optional dedicated rayon thread pool, built from
+    /// `config.num_threads` when the `parallel` feature is enabled
+    /// and the config requested a custom pool size. Skipped from
+    /// serde — deserialised forests fall back to rayon's global
+    /// pool until the next [`from_config`](Self::from_config)-style
+    /// rebuild.
+    #[cfg(feature = "parallel")]
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pool: Option<std::sync::Arc<rayon::ThreadPool>>,
 }
 
 impl RandomCutForest {
@@ -90,11 +99,28 @@ impl RandomCutForest {
 
         let point_store = PointStore::new(config.dimension)?;
 
+        #[cfg(feature = "parallel")]
+        let pool = match config.num_threads {
+            Some(n) => Some(std::sync::Arc::new(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(n)
+                    .build()
+                    .map_err(|e| {
+                        RcfError::InvalidConfig(format!(
+                            "rayon ThreadPool build failed for num_threads={n}: {e}"
+                        ))
+                    })?,
+            )),
+            None => None,
+        };
+
         Ok(Self {
             config,
             trees,
             point_store,
             updates_seen: 0,
+            #[cfg(feature = "parallel")]
+            pool,
         })
     }
 
@@ -179,14 +205,26 @@ impl RandomCutForest {
 
         let new_idx = self.point_store.add(point)?;
 
+        // Per-tree work: returns the evicted_idx that hit zero on
+        // decr_ref (if any) so the caller can finalise the slot
+        // outside the parallel block. Routed through the dedicated
+        // thread pool when one is configured.
+        #[cfg(feature = "parallel")]
+        let pool = self.pool.clone();
+
         let Self {
             trees, point_store, ..
         } = self;
         let store: &PointStore = point_store;
 
-        // Per-tree work: returns the evicted_idx that hit zero on
-        // decr_ref (if any) so the caller can finalise the slot
-        // outside the parallel block.
+        #[cfg(feature = "parallel")]
+        let pending_frees = if let Some(p) = pool.as_deref() {
+            p.install(|| update_trees(trees, store, new_idx))?
+        } else {
+            update_trees(trees, store, new_idx)?
+        };
+
+        #[cfg(not(feature = "parallel"))]
         let pending_frees = update_trees(trees, store, new_idx)?;
 
         // Single-threaded post-process: turn `decr_ref` "hit-zero"
@@ -216,6 +254,14 @@ impl RandomCutForest {
         ensure_dim(point, self.config.dimension)?;
         ensure_finite(point)?;
 
+        #[cfg(feature = "parallel")]
+        let (total, count) = if let Some(p) = self.pool.as_deref() {
+            p.install(|| score_aggregate(&self.trees, point))?
+        } else {
+            score_aggregate(&self.trees, point)?
+        };
+
+        #[cfg(not(feature = "parallel"))]
         let (total, count) = score_aggregate(&self.trees, point)?;
 
         if count == 0 {
@@ -238,6 +284,14 @@ impl RandomCutForest {
         ensure_dim(point, self.config.dimension)?;
         ensure_finite(point)?;
 
+        #[cfg(feature = "parallel")]
+        let (mut accumulator, count) = if let Some(p) = self.pool.as_deref() {
+            p.install(|| attribution_aggregate(&self.trees, self.config.dimension, point))?
+        } else {
+            attribution_aggregate(&self.trees, self.config.dimension, point)?
+        };
+
+        #[cfg(not(feature = "parallel"))]
         let (mut accumulator, count) =
             attribution_aggregate(&self.trees, self.config.dimension, point)?;
 
@@ -439,7 +493,7 @@ fn attribution_aggregate(
                 continue;
             };
             let mass = tree.store().node(root)?.mass();
-            let visitor = AttributionVisitor::new(point.to_vec(), mass)?;
+            let visitor = AttributionVisitor::new(point, mass)?;
             let di = tree.traverse(point, visitor)?;
             accumulator.accumulate(&di)?;
             count += 1;
@@ -482,6 +536,49 @@ mod tests {
         assert_eq!(forest.sample_size(), 16);
         assert_eq!(forest.dimension(), 2);
         assert_eq!(forest.updates_seen(), 0);
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn dedicated_thread_pool_runs_score_and_update() {
+        let mut f = ForestBuilder::new(2)
+            .num_trees(50)
+            .sample_size(16)
+            .seed(2026)
+            .num_threads(2)
+            .build()
+            .expect("custom pool builds");
+        for i in 0..100 {
+            let v = i as f64 * 0.01;
+            f.update(vec![v, v + 0.5]).unwrap();
+        }
+        let score: f64 = f.score(&[5.0, 5.0]).unwrap().into();
+        assert!(score >= 0.0);
+        assert_eq!(f.config().num_threads, Some(2));
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn dedicated_thread_pool_zero_threads_rejected_at_validate() {
+        let err = ForestBuilder::new(2)
+            .num_trees(50)
+            .sample_size(16)
+            .num_threads(0)
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, RcfError::InvalidConfig(_)));
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    #[test]
+    fn num_threads_field_inert_without_parallel_feature() {
+        let f = ForestBuilder::new(2)
+            .num_trees(50)
+            .sample_size(16)
+            .num_threads(4)
+            .build()
+            .expect("config with num_threads still validates without parallel feature");
+        assert_eq!(f.config().num_threads, Some(4));
     }
 
     #[test]
