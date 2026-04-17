@@ -17,6 +17,7 @@ use crate::domain::{BoundingBox, Cut};
 ///
 /// [`NodeStore`]: crate::tree::NodeStore
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NodeRef(u32);
 
 impl NodeRef {
@@ -83,6 +84,7 @@ impl NodeRef {
 /// box and two children, or a leaf pointing into the future point
 /// store (story RCF.7).
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Node {
     /// Internal node: a cut hyperplane plus the union bounding box of
     /// the subtree, two children, an optional parent and the mass

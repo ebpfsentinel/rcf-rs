@@ -16,6 +16,7 @@ use crate::tree::PointAccessor;
 
 /// Refcounted ring buffer of points indexed by `point_idx`.
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PointStore {
     /// Per-slot point payload. `None` slots are free.
     points: Vec<Option<Vec<f64>>>,

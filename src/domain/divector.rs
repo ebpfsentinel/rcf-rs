@@ -12,6 +12,7 @@ use crate::error::{RcfError, RcfResult};
 
 /// Two-sided per-dimension attribution accumulator.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DiVector {
     /// Contribution from cuts where the point lies above the cut.
     high: Vec<f64>,

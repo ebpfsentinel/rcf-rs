@@ -18,6 +18,7 @@ use crate::error::{RcfError, RcfResult};
 
 /// A random cut along one dimension at a given coordinate.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Cut {
     /// Dimension that the cut is perpendicular to.
     dim: usize,

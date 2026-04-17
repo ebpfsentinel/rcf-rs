@@ -97,6 +97,8 @@ pub mod config;
 pub mod domain;
 pub mod error;
 pub mod forest;
+#[cfg(feature = "serde")]
+pub mod persistence;
 pub mod sampler;
 pub mod tree;
 pub mod visitor;

@@ -29,6 +29,7 @@ pub const DEFAULT_TIME_DECAY: f64 = 0.0;
 
 /// Validated forest hyperparameters.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RcfConfig {
     /// Per-point dimensionality (`feature_dim` in AWS terminology).
     pub dimension: usize,

@@ -26,6 +26,7 @@ use crate::visitor::{AttributionVisitor, ScalarScoreVisitor};
 
 /// Random Cut Forest aggregate.
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RandomCutForest {
     /// Validated configuration.
     config: RcfConfig,

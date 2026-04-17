@@ -50,6 +50,25 @@ pub enum RcfError {
         /// Current length of the underlying collection.
         len: usize,
     },
+
+    /// Persistence: serialising the forest failed.
+    #[error("serialization failed: {0}")]
+    SerializationFailed(String),
+
+    /// Persistence: deserialising the forest failed (truncated bytes,
+    /// malformed JSON, version-skew payload, etc).
+    #[error("deserialization failed: {0}")]
+    DeserializationFailed(String),
+
+    /// Persistence: the encoded version prefix does not match the
+    /// running library's expected version.
+    #[error("incompatible persistence version: found {found}, expected {expected}")]
+    IncompatibleVersion {
+        /// Version embedded in the loaded payload.
+        found: u32,
+        /// Version the running library understands.
+        expected: u32,
+    },
 }
 
 /// Convenience alias for `Result<T, RcfError>`.

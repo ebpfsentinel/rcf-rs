@@ -50,6 +50,7 @@ pub enum SamplerOp {
 
 /// Weighted reservoir entry; ordered by weight for the heap.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct WeightedEntry {
     /// Sampling weight: `ln(-ln(u)) − entries_seen · time_decay`.
     weight: f64,
@@ -93,6 +94,7 @@ impl Ord for WeightedEntry {
 /// the heap top is the largest among those, the candidate to evict
 /// when a smaller-weight item arrives.
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ReservoirSampler {
     /// Max-heap on weight: `peek()` returns the largest weight
     /// currently held, which is the next eviction candidate.

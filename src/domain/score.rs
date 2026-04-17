@@ -15,6 +15,7 @@ use crate::error::{RcfError, RcfResult};
 
 /// `NaN`-safe non-negative anomaly score.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AnomalyScore(f64);
 
 impl AnomalyScore {

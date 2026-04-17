@@ -22,6 +22,7 @@ use crate::error::{RcfError, RcfResult};
 
 /// Axis-aligned bounding box for `d`-dimensional points.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BoundingBox {
     /// Per-dimension lower corner.
     min: Vec<f64>,

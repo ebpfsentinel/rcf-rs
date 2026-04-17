@@ -52,6 +52,7 @@ impl PointAccessor for [Vec<f64>] {
 /// Incrementally-maintained random cut tree over up to `capacity`
 /// distinct points.
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RandomCutTree {
     /// Root reference; `None` when the tree holds no live leaves.
     root: Option<NodeRef>,

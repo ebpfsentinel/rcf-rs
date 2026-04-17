@@ -21,6 +21,7 @@ use crate::tree::node::{Node, NodeRef};
 /// Flat-array storage for [`Node`]s with `O(1)` allocation and
 /// deallocation via per-arena free lists.
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NodeStore {
     /// Internal-node arena. `None` slots are free.
     internals: Vec<Option<Node>>,

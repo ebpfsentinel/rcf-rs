@@ -23,8 +23,9 @@ unsafe_code = "forbid"
 [features]
 default = ["std"]
 std = []
-serde = ["dep:serde"]
+serde = ["dep:serde", "rand_chacha/serde"]
 serde_json = ["dep:serde_json", "serde"]
+bincode = ["dep:bincode", "serde"]
 
 [dependencies]
 thiserror = "2"
@@ -33,6 +34,7 @@ rand_chacha = { version = "0.9", default-features = false, features = ["std"] }
 getrandom = "0.3"
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+bincode = { version = "2", features = ["serde"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["plotters", "cargo_bench_support"] }
