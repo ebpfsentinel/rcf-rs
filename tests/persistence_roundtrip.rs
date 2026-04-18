@@ -137,12 +137,12 @@ fn binary_version_mismatch_rejected() {
 fn json_version_mismatch_rejected() {
     let f = trained_2(42, 8, 20, 0.0);
     let json = f.to_json().unwrap();
-    let bogus = json.replacen("\"version\":1", "\"version\":42", 1);
+    let bogus = json.replacen("\"version\":3", "\"version\":42", 1);
     assert!(matches!(
         RandomCutForest::<2>::from_json(&bogus).unwrap_err(),
         RcfError::IncompatibleVersion {
             found: 42,
-            expected: 1
+            expected: 3
         }
     ));
 }

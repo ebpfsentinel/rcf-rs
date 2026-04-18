@@ -102,6 +102,7 @@
 
 pub mod attribution_stability;
 pub mod bootstrap;
+pub mod calibrator;
 pub mod config;
 pub mod domain;
 pub mod early_term;
@@ -122,6 +123,7 @@ pub mod visitor;
 
 pub use attribution_stability::AttributionStability;
 pub use bootstrap::BootstrapReport;
+pub use calibrator::{PlattCalibrator, PlattFitConfig};
 pub use config::{ForestBuilder, RcfConfig};
 pub use domain::{AnomalyScore, BoundingBox, Cut, DiVector, Point};
 pub use early_term::{EarlyTermConfig, EarlyTermScore};

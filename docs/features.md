@@ -113,6 +113,19 @@ reports how many trees were actually walked.
 
 Example: `examples/early_term.rs`.
 
+## Calibrated probability
+
+`PlattCalibrator::fit(&[(score, label)])` fits a 1-D sigmoid
+(Platt 1999 / Lin-Lin-Weng 2007) that maps raw scores to
+`P(anomaly | score) ∈ [0, 1]`. Stable Newton-Raphson with
+backtracking line search, target smoothing keeps label-homogeneous
+sets numerically safe. Fits persist via serde for reuse at
+inference time. Intended for audit-defensible alerting policies
+(SOC2 / NIS2) where a raw score is meaningless in compliance
+paperwork.
+
+Example: `examples/calibrator.rs`.
+
 ## Observability
 
 `with_metrics_sink(Arc<dyn MetricsSink>)` on every detector streams
