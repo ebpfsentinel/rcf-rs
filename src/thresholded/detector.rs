@@ -72,6 +72,14 @@ pub struct ThresholdedForest<const D: usize> {
     thresholded: ThresholdedConfig,
     /// Running mean/variance of the per-point anomaly scores.
     stats: EmaStats,
+    /// Observability sink for threshold-layer events. Distinct from
+    /// the inner forest's sink so wrapper-only metrics
+    /// (`rcf_process_total`, `rcf_anomalies_fired_total`,
+    /// `rcf_threshold_current`, `rcf_grade`) do not duplicate the
+    /// forest's counters.
+    #[cfg(feature = "std")]
+    #[cfg_attr(feature = "serde", serde(skip, default = "crate::metrics::default_sink"))]
+    metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
 }
 
 impl<const D: usize> ThresholdedForest<D> {
@@ -94,7 +102,32 @@ impl<const D: usize> ThresholdedForest<D> {
             forest,
             thresholded,
             stats,
+            #[cfg(feature = "std")]
+            metrics: crate::metrics::default_sink(),
         })
+    }
+
+    /// Install a [`crate::MetricsSink`] — every subsequent
+    /// `process` / `score_only` call emits counters and histograms
+    /// into it. Does **not** propagate to the underlying forest;
+    /// install on the forest separately if you also want low-level
+    /// `rcf_updates_total` / `rcf_score` / `rcf_deletes_total`
+    /// events.
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub fn with_metrics_sink(
+        mut self,
+        sink: std::sync::Arc<dyn crate::metrics::MetricsSink>,
+    ) -> Self {
+        self.metrics = sink;
+        self
+    }
+
+    /// Read-only handle to the installed threshold-layer sink.
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub fn metrics_sink(&self) -> &std::sync::Arc<dyn crate::metrics::MetricsSink> {
+        &self.metrics
     }
 
     /// Read-only access to the underlying forest.
@@ -163,13 +196,16 @@ impl<const D: usize> ThresholdedForest<D> {
                 // Cold start: no leaves yet. Record the insert,
                 // emit a warming-up verdict, do not update stats.
                 self.forest.update(point)?;
-                return AnomalyGrade::new(
+                let verdict = AnomalyGrade::new(
                     AnomalyScore::new(0.0)?,
                     self.thresholded.min_threshold,
                     0.0,
                     false,
                     false,
-                );
+                )?;
+                #[cfg(feature = "std")]
+                self.emit_process_metrics(&verdict);
+                return Ok(verdict);
             }
             Err(other) => return Err(other),
         };
@@ -178,6 +214,8 @@ impl<const D: usize> ThresholdedForest<D> {
 
         let verdict = self.grade_from_score(score)?;
         self.stats.update(f64::from(score));
+        #[cfg(feature = "std")]
+        self.emit_process_metrics(&verdict);
         Ok(verdict)
     }
 
@@ -283,6 +321,8 @@ impl<const D: usize> ThresholdedForest<D> {
                     false,
                     false,
                 )?;
+                #[cfg(feature = "std")]
+                self.emit_process_metrics(&grade);
                 return Ok((idx, grade));
             }
             Err(other) => return Err(other),
@@ -291,7 +331,25 @@ impl<const D: usize> ThresholdedForest<D> {
         let idx = self.forest.update_indexed(point)?;
         let verdict = self.grade_from_score(score)?;
         self.stats.update(f64::from(score));
+        #[cfg(feature = "std")]
+        self.emit_process_metrics(&verdict);
         Ok((idx, verdict))
+    }
+
+    /// Emit the counters / gauges / histograms associated with a
+    /// completed `process` call. Called once per public process
+    /// entry so cold-start warming-up verdicts are counted too.
+    #[cfg(feature = "std")]
+    fn emit_process_metrics(&self, verdict: &AnomalyGrade) {
+        use crate::metrics::names;
+        self.metrics.inc_counter(names::PROCESS_TOTAL, 1);
+        self.metrics
+            .observe_histogram(names::GRADE_OBSERVATION, verdict.grade());
+        if verdict.is_anomaly() {
+            self.metrics.inc_counter(names::ANOMALIES_FIRED_TOTAL, 1);
+        }
+        self.metrics
+            .set_gauge(names::THRESHOLD_CURRENT, self.current_threshold());
     }
 
     /// Translate a raw anomaly score into a graded verdict using the

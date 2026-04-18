@@ -96,6 +96,10 @@ where
     /// Factory used to build a detector when a tenant is seen for
     /// the first time (or after its entry has been evicted).
     factory: Box<ForestFactory<D>>,
+    /// Observability sink for pool-level events (LRU evictions,
+    /// resident-count gauge). Per-tenant detectors have their own
+    /// sinks that the caller can install inside the factory closure.
+    metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
 }
 
 impl<K, const D: usize> core::fmt::Debug for TenantForestPool<K, D>
@@ -111,6 +115,7 @@ where
             .field("access_counter", &self.access_counter)
             .field("tenants", &self.forests.keys().collect::<Vec<_>>())
             .field("factory", &"<dyn Fn>")
+            .field("metrics", &self.metrics)
             .finish()
     }
 }
@@ -144,7 +149,42 @@ where
             capacity,
             access_counter: 0,
             factory: Box::new(factory),
+            metrics: crate::metrics::default_sink(),
         })
+    }
+
+    /// Install a [`crate::MetricsSink`] for pool-level events.
+    /// Emits `rcf_tenants_resident` gauge updates on every public
+    /// mutation and `rcf_tenant_evictions_total` on LRU evictions.
+    /// Per-tenant detector metrics are the factory's responsibility.
+    #[must_use]
+    pub fn with_metrics_sink(
+        mut self,
+        sink: std::sync::Arc<dyn crate::metrics::MetricsSink>,
+    ) -> Self {
+        #[allow(clippy::cast_precision_loss)]
+        sink.set_gauge(
+            crate::metrics::names::TENANTS_RESIDENT,
+            self.forests.len() as f64,
+        );
+        self.metrics = sink;
+        self
+    }
+
+    /// Read-only handle to the installed pool-level sink.
+    #[must_use]
+    pub fn metrics_sink(&self) -> &std::sync::Arc<dyn crate::metrics::MetricsSink> {
+        &self.metrics
+    }
+
+    /// Refresh the `rcf_tenants_resident` gauge — called internally
+    /// after every op that mutates the resident set.
+    fn emit_resident_gauge(&self) {
+        #[allow(clippy::cast_precision_loss)]
+        self.metrics.set_gauge(
+            crate::metrics::names::TENANTS_RESIDENT,
+            self.forests.len() as f64,
+        );
     }
 
     /// Maximum number of tenants the pool holds simultaneously.
@@ -307,7 +347,8 @@ where
         if !self.forests.contains_key(&key) && self.forests.len() >= self.capacity {
             self.evict_lru();
         }
-        self.forests
+        let previous = self
+            .forests
             .insert(
                 key,
                 TenantSlot {
@@ -315,18 +356,25 @@ where
                     last_access: tick,
                 },
             )
-            .map(|slot| *slot.forest)
+            .map(|slot| *slot.forest);
+        self.emit_resident_gauge();
+        previous
     }
 
     /// Drop the tenant's detector. Returns the detector so callers
     /// can hand it back to the factory or persist it before release.
     pub fn remove(&mut self, key: &K) -> Option<ThresholdedForest<D>> {
-        self.forests.remove(key).map(|slot| *slot.forest)
+        let out = self.forests.remove(key).map(|slot| *slot.forest);
+        if out.is_some() {
+            self.emit_resident_gauge();
+        }
+        out
     }
 
     /// Drop every tenant's detector.
     pub fn clear(&mut self) {
         self.forests.clear();
+        self.emit_resident_gauge();
     }
 
     /// Iterate `(key, detector)` pairs in an unspecified order —
@@ -364,6 +412,9 @@ where
             .min_by_key(|(_, slot)| slot.last_access)
             .map(|(k, _)| k.clone())?;
         let slot = self.forests.remove(&victim_key)?;
+        self.metrics
+            .inc_counter(crate::metrics::names::TENANT_EVICTIONS_TOTAL, 1);
+        self.emit_resident_gauge();
         Some((victim_key, *slot.forest))
     }
 
@@ -390,6 +441,7 @@ where
                     last_access: tick,
                 },
             );
+            self.emit_resident_gauge();
         }
         // At this point the entry exists; bump its access stamp and
         // return a mutable handle.

@@ -73,6 +73,13 @@ pub struct RandomCutForest<const D: usize> {
     #[cfg(feature = "parallel")]
     #[cfg_attr(feature = "serde", serde(skip))]
     pool: Option<std::sync::Arc<rayon::ThreadPool>>,
+    /// Observability sink — every public operation emits counters,
+    /// gauges, and histogram observations into it. Defaults to a
+    /// shared [`crate::NoopSink`] so a detector without an attached
+    /// sink pays only an inlined no-op per event.
+    #[cfg(feature = "std")]
+    #[cfg_attr(feature = "serde", serde(skip, default = "crate::metrics::default_sink"))]
+    metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
 }
 
 impl<const D: usize> RandomCutForest<D> {
@@ -144,7 +151,32 @@ impl<const D: usize> RandomCutForest<D> {
             updates_seen: 0,
             #[cfg(feature = "parallel")]
             pool,
+            #[cfg(feature = "std")]
+            metrics: crate::metrics::default_sink(),
         })
+    }
+
+    /// Install a [`crate::MetricsSink`] — every subsequent public
+    /// op emits counters / gauges / histograms into it. Zero-cost
+    /// when the default [`crate::NoopSink`] is kept.
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub fn with_metrics_sink(
+        mut self,
+        sink: std::sync::Arc<dyn crate::metrics::MetricsSink>,
+    ) -> Self {
+        use crate::metrics::names;
+        #[allow(clippy::cast_precision_loss)]
+        sink.set_gauge(names::FOREST_TREES, self.trees.len() as f64);
+        self.metrics = sink;
+        self
+    }
+
+    /// Read-only handle to the installed sink — mainly for tests.
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub fn metrics_sink(&self) -> &std::sync::Arc<dyn crate::metrics::MetricsSink> {
+        &self.metrics
     }
 
     /// Read-only access to the validated config.
@@ -300,6 +332,8 @@ impl<const D: usize> RandomCutForest<D> {
         }
 
         self.updates_seen = self.updates_seen.saturating_add(1);
+        #[cfg(feature = "std")]
+        self.metrics.inc_counter(crate::metrics::names::UPDATES_TOTAL, 1);
         Ok(new_idx)
     }
 
@@ -336,6 +370,11 @@ impl<const D: usize> RandomCutForest<D> {
         }
         if went_to_zero {
             point_store.set_free(point_idx)?;
+        }
+        #[cfg(feature = "std")]
+        if removed_from_any {
+            self.metrics
+                .inc_counter(crate::metrics::names::DELETES_TOTAL, 1);
         }
         Ok(removed_from_any)
     }
@@ -408,7 +447,11 @@ impl<const D: usize> RandomCutForest<D> {
 
         #[allow(clippy::cast_precision_loss)]
         let mean = total / count as f64;
-        AnomalyScore::new(mean.max(0.0))
+        let score = AnomalyScore::new(mean.max(0.0))?;
+        #[cfg(feature = "std")]
+        self.metrics
+            .observe_histogram(crate::metrics::names::SCORE_OBSERVATION, f64::from(score));
+        Ok(score)
     }
 
     /// Compute the per-feature attribution of `point`'s anomaly

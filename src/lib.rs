@@ -107,7 +107,9 @@ pub mod domain;
 pub mod error;
 pub mod forest;
 pub mod group_score;
+pub mod histogram;
 pub mod meta_drift;
+pub mod metrics;
 #[cfg(feature = "serde")]
 pub mod persistence;
 #[cfg(feature = "std")]
@@ -124,7 +126,9 @@ pub use domain::{AnomalyScore, BoundingBox, Cut, DiVector, Point};
 pub use error::{RcfError, RcfResult};
 pub use forest::{PointStore, RandomCutForest};
 pub use group_score::{FeatureGroup, FeatureGroups, FeatureGroupsBuilder, GroupScores};
+pub use histogram::{HistogramConfig, ScoreHistogram};
 pub use meta_drift::{CusumConfig, DriftKind, DriftVerdict, MetaDriftDetector};
+pub use metrics::{MetricsSink, NoopSink};
 #[cfg(feature = "std")]
 pub use pool::TenantForestPool;
 pub use sampler::{ReservoirSampler, SamplerOp};

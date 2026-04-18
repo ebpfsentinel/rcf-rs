@@ -92,6 +92,19 @@ without scaling, random cuts are dominated by the widest dim. Pass
 upstream if full z-score is needed. See
 `examples/delete_and_scales.rs`.
 
+**Observability** — every detector exposes a consuming
+`.with_metrics_sink(Arc<dyn MetricsSink>)` that streams counters
+(`rcf_updates_total`, `rcf_process_total`, `rcf_anomalies_fired_total`,
+`rcf_drift_fires_total`, `rcf_tenant_evictions_total`,
+`rcf_deletes_total`), gauges (`rcf_forest_trees`,
+`rcf_threshold_current`, `rcf_tenants_resident`), and histogram
+observations (`rcf_score`, `rcf_grade`, `rcf_drift_s_high`,
+`rcf_drift_s_low`) into any Prometheus / StatsD / OpenTelemetry
+backend the caller wires. `NoopSink` is the zero-cost default.
+Complement with `ScoreHistogram` (`with_range(min, max)`) for
+in-process score distribution export — bins, edges, percentile,
+merge. See `examples/observability.rs`.
+
 ## Quickstart
 
 ```rust,ignore

@@ -182,6 +182,11 @@ pub struct MetaDriftDetector {
     s_high: f64,
     /// Downward cumulative sum accumulator.
     s_low: f64,
+    /// Observability sink — emits the CUSUM accumulators + fire
+    /// counter. Defaults to [`crate::NoopSink`].
+    #[cfg(feature = "std")]
+    #[cfg_attr(feature = "serde", serde(skip, default = "crate::metrics::default_sink"))]
+    metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
 }
 
 impl MetaDriftDetector {
@@ -199,7 +204,29 @@ impl MetaDriftDetector {
             stats,
             s_high: 0.0,
             s_low: 0.0,
+            #[cfg(feature = "std")]
+            metrics: crate::metrics::default_sink(),
         })
+    }
+
+    /// Install a [`crate::MetricsSink`] — emits
+    /// `rcf_drift_s_high` / `rcf_drift_s_low` histograms per call
+    /// and increments `rcf_drift_fires_total` on fire verdicts.
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub fn with_metrics_sink(
+        mut self,
+        sink: std::sync::Arc<dyn crate::metrics::MetricsSink>,
+    ) -> Self {
+        self.metrics = sink;
+        self
+    }
+
+    /// Read-only handle to the installed sink.
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub fn metrics_sink(&self) -> &std::sync::Arc<dyn crate::metrics::MetricsSink> {
+        &self.metrics
     }
 
     /// Default-configured detector.
@@ -284,6 +311,17 @@ impl MetaDriftDetector {
         } else {
             None
         };
+
+        #[cfg(feature = "std")]
+        {
+            use crate::metrics::names;
+            self.metrics
+                .observe_histogram(names::DRIFT_S_HIGH, self.s_high);
+            self.metrics.observe_histogram(names::DRIFT_S_LOW, self.s_low);
+            if drift.is_some() {
+                self.metrics.inc_counter(names::DRIFT_FIRES_TOTAL, 1);
+            }
+        }
 
         DriftVerdict {
             s_high: self.s_high,
