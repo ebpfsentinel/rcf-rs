@@ -37,9 +37,11 @@
 //!
 //! Modules are organised in layered fashion: `domain` (value objects),
 //! `tree` (storage + cut tree), `sampler` (reservoir), `visitor` (scoring
-//! strategies), `forest` (aggregate root), and `thresholded` (adaptive
-//! threshold layer on top of the forest). The `persistence` module is
-//! gated behind the `serde` feature.
+//! strategies), `forest` (aggregate root), `thresholded` (adaptive
+//! threshold layer on top of the forest), and `pool` (bounded
+//! per-tenant detector pool with LRU eviction). The `persistence`
+//! module is gated behind the `serde` feature; `pool` is gated behind
+//! `std`.
 //!
 //! # Example
 //!
@@ -98,6 +100,8 @@ pub mod error;
 pub mod forest;
 #[cfg(feature = "serde")]
 pub mod persistence;
+#[cfg(feature = "std")]
+pub mod pool;
 pub mod sampler;
 pub mod thresholded;
 pub mod tree;
@@ -107,6 +111,8 @@ pub use config::{ForestBuilder, RcfConfig};
 pub use domain::{AnomalyScore, BoundingBox, Cut, DiVector, Point};
 pub use error::{RcfError, RcfResult};
 pub use forest::{PointStore, RandomCutForest};
+#[cfg(feature = "std")]
+pub use pool::TenantForestPool;
 pub use sampler::{ReservoirSampler, SamplerOp};
 pub use thresholded::{
     AnomalyGrade, EmaStats, ThresholdedConfig, ThresholdedForest, ThresholdedForestBuilder,

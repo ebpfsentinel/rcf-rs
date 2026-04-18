@@ -186,12 +186,29 @@ impl<const D: usize> ThresholdedForest<D> {
     /// snapshot of the model without contaminating the training
     /// stream.
     ///
+    /// On an empty forest (no points have been inserted yet), returns
+    /// a warming-up verdict (`ready = false`, `is_anomaly = false`)
+    /// rather than an error — mirrors [`Self::process`]'s cold-start
+    /// handling so callers can query the detector during the warmup
+    /// window without special-casing the empty case.
+    ///
     /// # Errors
     ///
-    /// Same as [`RandomCutForest::score`].
+    /// - [`RcfError::NaNValue`] when the point contains a non-finite
+    ///   component.
+    /// - Any other error bubbled up from [`RandomCutForest::score`].
     pub fn score_only(&self, point: &[f64; D]) -> RcfResult<AnomalyGrade> {
-        let score = self.forest.score(point)?;
-        self.grade_from_score(score)
+        match self.forest.score(point) {
+            Ok(score) => self.grade_from_score(score),
+            Err(RcfError::EmptyForest) => AnomalyGrade::new(
+                AnomalyScore::new(0.0)?,
+                self.thresholded.min_threshold,
+                0.0,
+                false,
+                false,
+            ),
+            Err(other) => Err(other),
+        }
     }
 
     /// Compute the per-feature attribution of `point`'s anomaly score

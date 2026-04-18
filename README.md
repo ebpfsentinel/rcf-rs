@@ -31,6 +31,14 @@ AWS's `CompactSampler` uses `0.125`. Configure via
 with periodic checkpointing so restarts resume exactly where they left
 off — see `examples/warm_reload.rs`.
 
+**Per-tenant pool** (`TenantForestPool<K, D>`) keeps one
+`ThresholdedForest` per tenant key with bounded LRU eviction and a
+factory closure for lazy instantiation. A baseline shock on tenant
+A does not move tenant B's adaptive threshold — each tenant owns its
+own EMA and reservoir. Walk the pool with `iter` to snapshot every
+tenant to disk; reload by iterating a snapshot directory and calling
+`insert` on a fresh pool. See `examples/tenant_pool.rs`.
+
 ## Quickstart
 
 ```rust,ignore
