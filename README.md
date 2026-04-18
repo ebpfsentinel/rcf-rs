@@ -48,6 +48,15 @@ rows are skipped and tallied in the returned `BootstrapReport` so
 gappy TSDB queries don't sink the restart. See
 `examples/bootstrap.rs`.
 
+**Group-score decomposition** (`group_scores(&point, &FeatureGroups)`)
+turns the per-dim `DiVector` into a compact per-group breakdown —
+declare semantic groups like `rate`, `payload`, `cardinality` once
+at build time and every score call returns a `GroupScores` with the
+contribution of each group plus a `top_group()` driver. Available on
+all three detector types. Great for SOC triage: *"alert driven by
+payload, not by rate"* is more actionable than a ranked 14-dim
+vector. See `examples/group_scores.rs`.
+
 ## Quickstart
 
 ```rust,ignore

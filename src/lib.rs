@@ -39,10 +39,11 @@
 //! `tree` (storage + cut tree), `sampler` (reservoir), `visitor` (scoring
 //! strategies), `forest` (aggregate root), `thresholded` (adaptive
 //! threshold layer on top of the forest), `pool` (bounded per-tenant
-//! detector pool with LRU eviction), and `bootstrap` (cold-start
-//! replay helpers for restart resumption from an upstream TSDB). The
-//! `persistence` module is gated behind the `serde` feature; `pool`
-//! is gated behind `std`.
+//! detector pool with LRU eviction), `bootstrap` (cold-start replay
+//! helpers for restart resumption from an upstream TSDB), and
+//! `group_score` (named-group decomposition of the per-dim
+//! attribution vector). The `persistence` module is gated behind the
+//! `serde` feature; `pool` is gated behind `std`.
 //!
 //! # Example
 //!
@@ -100,6 +101,7 @@ pub mod config;
 pub mod domain;
 pub mod error;
 pub mod forest;
+pub mod group_score;
 #[cfg(feature = "serde")]
 pub mod persistence;
 #[cfg(feature = "std")]
@@ -114,6 +116,7 @@ pub use config::{ForestBuilder, RcfConfig};
 pub use domain::{AnomalyScore, BoundingBox, Cut, DiVector, Point};
 pub use error::{RcfError, RcfResult};
 pub use forest::{PointStore, RandomCutForest};
+pub use group_score::{FeatureGroup, FeatureGroups, FeatureGroupsBuilder, GroupScores};
 #[cfg(feature = "std")]
 pub use pool::TenantForestPool;
 pub use sampler::{ReservoirSampler, SamplerOp};
