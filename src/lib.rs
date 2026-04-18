@@ -40,10 +40,11 @@
 //! strategies), `forest` (aggregate root), `thresholded` (adaptive
 //! threshold layer on top of the forest), `pool` (bounded per-tenant
 //! detector pool with LRU eviction), `bootstrap` (cold-start replay
-//! helpers for restart resumption from an upstream TSDB), and
+//! helpers for restart resumption from an upstream TSDB),
 //! `group_score` (named-group decomposition of the per-dim
-//! attribution vector). The `persistence` module is gated behind the
-//! `serde` feature; `pool` is gated behind `std`.
+//! attribution vector), and `attribution_stability` (inter-tree
+//! dispersion + confidence for attribution). The `persistence` module
+//! is gated behind the `serde` feature; `pool` is gated behind `std`.
 //!
 //! # Example
 //!
@@ -97,6 +98,7 @@
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
 
+pub mod attribution_stability;
 pub mod bootstrap;
 pub mod config;
 pub mod domain;
@@ -112,6 +114,7 @@ pub mod thresholded;
 pub mod tree;
 pub mod visitor;
 
+pub use attribution_stability::AttributionStability;
 pub use bootstrap::BootstrapReport;
 pub use config::{ForestBuilder, RcfConfig};
 pub use domain::{AnomalyScore, BoundingBox, Cut, DiVector, Point};

@@ -57,6 +57,15 @@ all three detector types. Great for SOC triage: *"alert driven by
 payload, not by rate"* is more actionable than a ranked 14-dim
 vector. See `examples/group_scores.rs`.
 
+**Attribution stability** (`attribution_stability(&point)`) exposes
+the per-dim variance / stddev of the attribution across trees on top
+of the usual mean. Pairs with a `confidence(dim) ∈ [0, 1]` helper
+derived from the coefficient of variation — `argmax_weighted()` picks
+the dim whose `mean × confidence` is highest, demoting dims where the
+forest disagreed. An alert whose driver dim has low confidence is
+likely a lucky coincidence, not a stable signal. Available on all
+three detector types. See `examples/attribution_stability.rs`.
+
 ## Quickstart
 
 ```rust,ignore
