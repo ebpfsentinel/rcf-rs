@@ -32,6 +32,7 @@
 use core::hash::Hash;
 use std::collections::HashMap;
 
+use crate::bootstrap::BootstrapReport;
 use crate::domain::DiVector;
 use crate::error::{RcfError, RcfResult};
 use crate::thresholded::{AnomalyGrade, ThresholdedForest};
@@ -239,6 +240,30 @@ where
     /// [`ThresholdedForest::attribution`] errors.
     pub fn attribution(&mut self, key: &K, point: &[f64; D]) -> RcfResult<DiVector> {
         self.touch_or_create(key)?.attribution(point)
+    }
+
+    /// Replay historical `points` into the tenant's detector before
+    /// any live traffic. Lazily instantiates the tenant (like
+    /// [`Self::process`]), then delegates to
+    /// [`ThresholdedForest::bootstrap`]. Returns a report summarising
+    /// ingestion.
+    ///
+    /// Use this when restarting a long-running agent: pull recent
+    /// per-tenant history from the upstream TSDB (`Prometheus`,
+    /// `Loki`, `InfluxDB`, parquet dump…), hand it to this method per
+    /// tenant, and the pool is hot before the live streaming pipeline
+    /// is switched back on — avoiding the per-tenant warmup coverage
+    /// hole.
+    ///
+    /// # Errors
+    ///
+    /// Propagates factory and
+    /// [`ThresholdedForest::bootstrap`] errors.
+    pub fn bootstrap<I>(&mut self, key: &K, points: I) -> RcfResult<BootstrapReport>
+    where
+        I: IntoIterator<Item = [f64; D]>,
+    {
+        self.touch_or_create(key)?.bootstrap(points)
     }
 
     /// Install a pre-built detector for `key`, replacing any

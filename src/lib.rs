@@ -38,10 +38,11 @@
 //! Modules are organised in layered fashion: `domain` (value objects),
 //! `tree` (storage + cut tree), `sampler` (reservoir), `visitor` (scoring
 //! strategies), `forest` (aggregate root), `thresholded` (adaptive
-//! threshold layer on top of the forest), and `pool` (bounded
-//! per-tenant detector pool with LRU eviction). The `persistence`
-//! module is gated behind the `serde` feature; `pool` is gated behind
-//! `std`.
+//! threshold layer on top of the forest), `pool` (bounded per-tenant
+//! detector pool with LRU eviction), and `bootstrap` (cold-start
+//! replay helpers for restart resumption from an upstream TSDB). The
+//! `persistence` module is gated behind the `serde` feature; `pool`
+//! is gated behind `std`.
 //!
 //! # Example
 //!
@@ -94,6 +95,7 @@
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
 
+pub mod bootstrap;
 pub mod config;
 pub mod domain;
 pub mod error;
@@ -107,6 +109,7 @@ pub mod thresholded;
 pub mod tree;
 pub mod visitor;
 
+pub use bootstrap::BootstrapReport;
 pub use config::{ForestBuilder, RcfConfig};
 pub use domain::{AnomalyScore, BoundingBox, Cut, DiVector, Point};
 pub use error::{RcfError, RcfResult};

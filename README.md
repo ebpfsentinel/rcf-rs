@@ -39,6 +39,15 @@ own EMA and reservoir. Walk the pool with `iter` to snapshot every
 tenant to disk; reload by iterating a snapshot directory and calling
 `insert` on a fresh pool. See `examples/tenant_pool.rs`.
 
+**Cold-start bootstrap** (`bootstrap(points)`) replays historical
+points from an upstream store (Prometheus / Loki / parquet dump) into
+a detector before live traffic is switched on — eliminating the
+per-restart warmup coverage hole. Available on `RandomCutForest`,
+`ThresholdedForest`, and `TenantForestPool` (per-tenant). Non-finite
+rows are skipped and tallied in the returned `BootstrapReport` so
+gappy TSDB queries don't sink the restart. See
+`examples/bootstrap.rs`.
+
 ## Quickstart
 
 ```rust,ignore
