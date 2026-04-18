@@ -4,9 +4,9 @@
 //! rejection, malformed-payload rejection, and the four matrix
 //! scenarios (empty, trained, time-decay, custom seed).
 //!
-//! Only compiled with `--features bincode,serde_json`.
+//! Only compiled with `--features postcard,serde_json`.
 
-#![cfg(all(feature = "bincode", feature = "serde_json"))]
+#![cfg(all(feature = "postcard", feature = "serde_json"))]
 #![allow(clippy::cast_precision_loss, clippy::float_cmp)] // Roundtrip asserts bit-exact f64 equality.
 
 use rcf_rs::{ForestBuilder, RandomCutForest, RcfError};

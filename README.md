@@ -155,10 +155,10 @@ by AWS's `randomcutforest-parkservices` TRCF, kept deliberately light
 | `std` | ✅ | Standard library support (future `no_std` planned) |
 | `parallel` | ✅ | Per-tree parallel insert/score/attribution via `rayon` |
 | `serde` | ✅ | Forest state serialisation |
-| `bincode` | ✅ | Versioned binary persistence helpers (implies `serde`) |
+| `postcard` | ✅ | Versioned binary persistence helpers via `postcard` (implies `serde`). Replaced `bincode` in format v2 after RustSec flagged `bincode` as unmaintained |
 | `serde_json` | ❌ | JSON helpers (implies `serde`) |
 
-The production profile (`parallel` + `serde` + `bincode`) is enabled
+The production profile (`parallel` + `serde` + `postcard`) is enabled
 by default because the intended deployment target — a long-running
 streaming agent that parallelises across cores and persists its
 forest across restarts — always needs all three. Opt out with

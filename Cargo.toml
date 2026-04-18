@@ -21,11 +21,14 @@ missing_docs = "warn"
 unsafe_code = "forbid"
 
 [features]
-default = ["std", "parallel", "serde", "bincode"]
+default = ["std", "parallel", "serde", "postcard"]
 std = []
 serde = ["dep:serde", "rand_chacha/serde"]
 serde_json = ["dep:serde_json", "serde"]
-bincode = ["dep:bincode", "serde"]
+# Compact binary persistence via `postcard` — the `bincode` crate was
+# marked unmaintained by RustSec in 2025, `postcard` is the natural
+# drop-in replacement (pure serde, varint-compact, still maintained).
+postcard = ["dep:postcard", "serde"]
 parallel = ["dep:rayon"]
 
 [dependencies]
@@ -36,7 +39,7 @@ getrandom = "0.3"
 wide = "0.7"
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
-bincode = { version = "2", features = ["serde"], optional = true }
+postcard = { version = "1", default-features = false, features = ["alloc", "use-std"], optional = true }
 rayon = { version = "1", optional = true }
 
 [dev-dependencies]
@@ -46,7 +49,7 @@ mimalloc = { version = "0.1", default-features = false }
 
 [[example]]
 name = "warm_reload"
-required-features = ["bincode", "std"]
+required-features = ["postcard", "std"]
 
 [[bench]]
 name = "forest_throughput"

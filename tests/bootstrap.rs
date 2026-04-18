@@ -12,7 +12,7 @@
 //! 5. Bootstrap interoperates with warm reload: bootstrap, persist,
 //!    reload; state survives round-trip.
 
-#![allow(clippy::cast_precision_loss, clippy::float_cmp)] // Bit-exact bincode roundtrip asserts + bounded casts.
+#![allow(clippy::cast_precision_loss, clippy::float_cmp)] // Bit-exact postcard roundtrip asserts + bounded casts.
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -142,7 +142,7 @@ fn bootstrap_skips_non_finite_rows() {
     assert_eq!(r.points_skipped, 3);
 }
 
-#[cfg(feature = "bincode")]
+#[cfg(feature = "postcard")]
 #[test]
 fn bootstrap_roundtrips_through_persistence() {
     let mut d = ThresholdedForestBuilder::<4>::new()

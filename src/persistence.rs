@@ -4,16 +4,18 @@
 //! Gated behind the `serde` cargo feature. Four flavours are
 //! exposed:
 //!
-//! - **Binary bytes** (`to_bytes` / `from_bytes`, gated on `bincode`):
-//!   a compact `bincode 2` payload prefixed with a 4-byte
+//! - **Binary bytes** (`to_bytes` / `from_bytes`, gated on `postcard`):
+//!   a compact `postcard` payload prefixed with a 4-byte
 //!   little-endian version field. Use this for on-disk snapshots or
-//!   to ship forests over a network socket.
+//!   to ship forests over a network socket. (`postcard` replaced
+//!   `bincode` in persistence format v2 after the `bincode` crate
+//!   was marked unmaintained by `RustSec` in 2025.)
 //! - **JSON text** (`to_json` / `from_json`, gated on `serde_json`):
 //!   a human-readable text encoding wrapping the same versioned
 //!   envelope. Useful for debugging or for callers who already pipe
 //!   JSON elsewhere.
 //! - **Atomic file path** (`to_path` / `from_path`, gated on
-//!   `bincode + std`): write-tmp-then-rename + `fsync` so a crash or
+//!   `postcard + std`): write-tmp-then-rename + `fsync` so a crash or
 //!   power-loss mid-save cannot corrupt the snapshot on disk. Pair
 //!   with periodic checkpointing for **warm reload** — the detector
 //!   resumes exactly where it left off across restarts.
@@ -30,21 +32,24 @@
 //! type level — callers must deserialise into a type with the same
 //! compile-time `D` that produced the payload.
 
-#[cfg(any(feature = "bincode", feature = "serde_json"))]
+#[cfg(any(feature = "postcard", feature = "serde_json"))]
 use crate::error::{RcfError, RcfResult};
 use crate::forest::RandomCutForest;
 #[cfg(feature = "serde")]
 use crate::thresholded::ThresholdedForest;
 
 /// Persistence format version for [`RandomCutForest`]. Bump on any
-/// breaking layout change.
-pub const PERSISTENCE_VERSION: u32 = 1;
+/// breaking layout change. Version `2` is `postcard`; version `1`
+/// was the original `bincode 2` payload — the serialiser changed
+/// when `RustSec` flagged `bincode` as unmaintained.
+pub const PERSISTENCE_VERSION: u32 = 2;
 
 /// Persistence format version for [`ThresholdedForest`]. Distinct
 /// from [`PERSISTENCE_VERSION`] because the threshold envelope carries
 /// additional state (EMA stats, threshold config) that evolves on its
-/// own cadence.
-pub const THRESHOLDED_PERSISTENCE_VERSION: u32 = 1;
+/// own cadence. Version `2` switched the underlying binary serialiser
+/// from `bincode` to `postcard`.
+pub const THRESHOLDED_PERSISTENCE_VERSION: u32 = 2;
 
 /// Number of bytes reserved for the version prefix.
 pub const VERSION_PREFIX_BYTES: usize = 4;
@@ -55,7 +60,7 @@ pub const VERSION_PREFIX_BYTES: usize = 4;
 ///
 /// Returns [`RcfError::DeserializationFailed`] when `bytes` is shorter
 /// than [`VERSION_PREFIX_BYTES`].
-#[cfg(feature = "bincode")]
+#[cfg(feature = "postcard")]
 fn read_version_prefix(bytes: &[u8]) -> RcfResult<u32> {
     if bytes.len() < VERSION_PREFIX_BYTES {
         return Err(RcfError::DeserializationFailed(format!(
@@ -75,7 +80,7 @@ fn read_version_prefix(bytes: &[u8]) -> RcfResult<u32> {
 /// single filesystem. The file is `fsync`'d before the rename so a
 /// power-loss between `write` and `rename` cannot leave a partially
 /// written snapshot on disk.
-#[cfg(all(feature = "std", any(feature = "bincode", feature = "serde_json")))]
+#[cfg(all(feature = "std", any(feature = "postcard", feature = "serde_json")))]
 mod atomic {
     use std::ffi::OsString;
     use std::fs::{File, rename};
@@ -113,7 +118,7 @@ mod atomic {
     }
 
     /// Read the full byte content of `path`.
-    #[cfg(feature = "bincode")]
+    #[cfg(feature = "postcard")]
     pub(super) fn read_all(path: &Path) -> RcfResult<Vec<u8>> {
         std::fs::read(path)
             .map_err(|e| RcfError::DeserializationFailed(format!("read {}: {e}", path.display())))
@@ -133,12 +138,12 @@ impl<const D: usize> RandomCutForest<D> {
     /// # Errors
     ///
     /// Returns [`RcfError::SerializationFailed`] when the underlying
-    /// `bincode` encoder rejects the payload.
-    #[cfg(feature = "bincode")]
+    /// `postcard` encoder rejects the payload.
+    #[cfg(feature = "postcard")]
     pub fn to_bytes(&self) -> RcfResult<Vec<u8>> {
         let mut out = Vec::with_capacity(VERSION_PREFIX_BYTES + 4096);
         out.extend_from_slice(&PERSISTENCE_VERSION.to_le_bytes());
-        let payload = bincode::serde::encode_to_vec(self, bincode::config::standard())
+        let payload = postcard::to_allocvec(self)
             .map_err(|e| RcfError::SerializationFailed(e.to_string()))?;
         out.extend_from_slice(&payload);
         Ok(out)
@@ -149,11 +154,11 @@ impl<const D: usize> RandomCutForest<D> {
     /// # Errors
     ///
     /// - [`RcfError::DeserializationFailed`] when the byte slice is
-    ///   too short to hold the version prefix or the bincode payload
-    ///   is malformed.
+    ///   too short to hold the version prefix or the `postcard`
+    ///   payload is malformed.
     /// - [`RcfError::IncompatibleVersion`] when the embedded version
     ///   does not match [`PERSISTENCE_VERSION`].
-    #[cfg(feature = "bincode")]
+    #[cfg(feature = "postcard")]
     pub fn from_bytes(bytes: &[u8]) -> RcfResult<Self> {
         let version = read_version_prefix(bytes)?;
         if version != PERSISTENCE_VERSION {
@@ -162,11 +167,8 @@ impl<const D: usize> RandomCutForest<D> {
                 expected: PERSISTENCE_VERSION,
             });
         }
-        let (forest, _consumed) = bincode::serde::decode_from_slice::<Self, _>(
-            &bytes[VERSION_PREFIX_BYTES..],
-            bincode::config::standard(),
-        )
-        .map_err(|e| RcfError::DeserializationFailed(e.to_string()))?;
+        let forest: Self = postcard::from_bytes(&bytes[VERSION_PREFIX_BYTES..])
+            .map_err(|e| RcfError::DeserializationFailed(e.to_string()))?;
         Ok(forest)
     }
 
@@ -179,7 +181,7 @@ impl<const D: usize> RandomCutForest<D> {
     ///
     /// - [`RcfError::SerializationFailed`] for any filesystem or
     ///   encoder failure.
-    #[cfg(all(feature = "bincode", feature = "std"))]
+    #[cfg(all(feature = "postcard", feature = "std"))]
     pub fn to_path(&self, path: impl AsRef<std::path::Path>) -> RcfResult<()> {
         let bytes = self.to_bytes()?;
         atomic::write_atomic(path.as_ref(), &bytes)
@@ -193,7 +195,7 @@ impl<const D: usize> RandomCutForest<D> {
     ///   read or the payload is malformed.
     /// - [`RcfError::IncompatibleVersion`] when the embedded version
     ///   does not match [`PERSISTENCE_VERSION`].
-    #[cfg(all(feature = "bincode", feature = "std"))]
+    #[cfg(all(feature = "postcard", feature = "std"))]
     pub fn from_path(path: impl AsRef<std::path::Path>) -> RcfResult<Self> {
         let bytes = atomic::read_all(path.as_ref())?;
         Self::from_bytes(&bytes)
@@ -274,12 +276,12 @@ impl<const D: usize> ThresholdedForest<D> {
     /// # Errors
     ///
     /// Returns [`RcfError::SerializationFailed`] when the underlying
-    /// `bincode` encoder rejects the payload.
-    #[cfg(feature = "bincode")]
+    /// `postcard` encoder rejects the payload.
+    #[cfg(feature = "postcard")]
     pub fn to_bytes(&self) -> RcfResult<Vec<u8>> {
         let mut out = Vec::with_capacity(VERSION_PREFIX_BYTES + 4096);
         out.extend_from_slice(&THRESHOLDED_PERSISTENCE_VERSION.to_le_bytes());
-        let payload = bincode::serde::encode_to_vec(self, bincode::config::standard())
+        let payload = postcard::to_allocvec(self)
             .map_err(|e| RcfError::SerializationFailed(e.to_string()))?;
         out.extend_from_slice(&payload);
         Ok(out)
@@ -291,11 +293,11 @@ impl<const D: usize> ThresholdedForest<D> {
     /// # Errors
     ///
     /// - [`RcfError::DeserializationFailed`] when the byte slice is
-    ///   too short to hold the version prefix or the bincode payload
-    ///   is malformed.
+    ///   too short to hold the version prefix or the `postcard`
+    ///   payload is malformed.
     /// - [`RcfError::IncompatibleVersion`] when the embedded version
     ///   does not match [`THRESHOLDED_PERSISTENCE_VERSION`].
-    #[cfg(feature = "bincode")]
+    #[cfg(feature = "postcard")]
     pub fn from_bytes(bytes: &[u8]) -> RcfResult<Self> {
         let version = read_version_prefix(bytes)?;
         if version != THRESHOLDED_PERSISTENCE_VERSION {
@@ -304,11 +306,8 @@ impl<const D: usize> ThresholdedForest<D> {
                 expected: THRESHOLDED_PERSISTENCE_VERSION,
             });
         }
-        let (detector, _consumed) = bincode::serde::decode_from_slice::<Self, _>(
-            &bytes[VERSION_PREFIX_BYTES..],
-            bincode::config::standard(),
-        )
-        .map_err(|e| RcfError::DeserializationFailed(e.to_string()))?;
+        let detector: Self = postcard::from_bytes(&bytes[VERSION_PREFIX_BYTES..])
+            .map_err(|e| RcfError::DeserializationFailed(e.to_string()))?;
         Ok(detector)
     }
 
@@ -319,7 +318,7 @@ impl<const D: usize> ThresholdedForest<D> {
     ///
     /// - [`RcfError::SerializationFailed`] for any filesystem or
     ///   encoder failure.
-    #[cfg(all(feature = "bincode", feature = "std"))]
+    #[cfg(all(feature = "postcard", feature = "std"))]
     pub fn to_path(&self, path: impl AsRef<std::path::Path>) -> RcfResult<()> {
         let bytes = self.to_bytes()?;
         atomic::write_atomic(path.as_ref(), &bytes)
@@ -333,7 +332,7 @@ impl<const D: usize> ThresholdedForest<D> {
     ///   read or the payload is malformed.
     /// - [`RcfError::IncompatibleVersion`] when the embedded version
     ///   does not match [`THRESHOLDED_PERSISTENCE_VERSION`].
-    #[cfg(all(feature = "bincode", feature = "std"))]
+    #[cfg(all(feature = "postcard", feature = "std"))]
     pub fn from_path(path: impl AsRef<std::path::Path>) -> RcfResult<Self> {
         let bytes = atomic::read_all(path.as_ref())?;
         Self::from_bytes(&bytes)
@@ -443,9 +442,9 @@ struct ThresholdedJsonEnvelopeOwned<const D: usize> {
     detector: ThresholdedForest<D>,
 }
 
-#[cfg(all(test, feature = "bincode"))]
+#[cfg(all(test, feature = "postcard"))]
 #[allow(clippy::float_cmp, clippy::cast_precision_loss, clippy::cast_lossless)] // Roundtrip asserts bit-exact equality + small bounded counters.
-mod bincode_tests {
+mod binary_tests {
     use super::*;
     use crate::ForestBuilder;
 

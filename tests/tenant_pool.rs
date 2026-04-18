@@ -101,7 +101,7 @@ fn capacity_enforces_lru_eviction() {
     assert_eq!(pool.len(), 3);
 }
 
-#[cfg(feature = "bincode")]
+#[cfg(feature = "postcard")]
 #[test]
 fn warm_reload_roundtrips_every_tenant() {
     let dir = std::env::temp_dir().join(format!(

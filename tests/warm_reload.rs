@@ -16,7 +16,7 @@
 //! 5. A save/reload/resume cycle extends training without breaking
 //!    the graded-verdict path.
 
-#![cfg(all(feature = "bincode", feature = "std"))]
+#![cfg(all(feature = "postcard", feature = "std"))]
 #![allow(clippy::cast_precision_loss, clippy::float_cmp)] // bit-exact roundtrip asserts + bounded casts.
 
 use std::ffi::OsString;
