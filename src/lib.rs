@@ -118,6 +118,7 @@ pub mod persistence;
 #[cfg(feature = "std")]
 pub mod pool;
 pub mod sampler;
+pub mod severity;
 pub mod thresholded;
 pub mod tree;
 pub mod visitor;
@@ -138,6 +139,7 @@ pub use metrics::{MetricsSink, NoopSink};
 #[cfg(feature = "std")]
 pub use pool::TenantForestPool;
 pub use sampler::{ReservoirSampler, SamplerOp};
+pub use severity::{Severity, SeverityBands};
 pub use thresholded::{
     AnomalyGrade, EmaStats, ThresholdedConfig, ThresholdedForest, ThresholdedForestBuilder,
 };

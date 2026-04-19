@@ -215,6 +215,22 @@ Source: `src/meta_drift.rs`.
 
 Example: `examples/meta_drift.rs`.
 
+### Severity bands
+
+`SeverityBands` + `Severity` enum classify raw anomaly scores into
+ordinal labels (`Normal` / `Low` / `Medium` / `High` / `Critical`).
+Defaults match eBPFsentinel Enterprise ml-detection
+(`2.0 / 3.0 / 4.0 / 5.0`). `Severity: Ord` lets callers route
+alerts via `sev >= Severity::High`. Methods on both
+`AnomalyScore::severity(&bands)` (bare forest) and
+`AnomalyGrade::severity(&bands)` (TRCF).
+
+Types: `Severity`, `SeverityBands`.
+
+Source: `src/severity.rs`.
+
+Example: `examples/severity.rs`.
+
 ### Calibrated probability (Platt scaling)
 
 `PlattCalibrator::fit(&[(score, label)], config)` fits a 1-D
