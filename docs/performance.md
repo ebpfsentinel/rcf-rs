@@ -245,43 +245,65 @@ whitelist `{2, 3, 7, 8, 9, 12, 16, 17, 18, 19, 25, 29, 31, 38, 51,
 55, 66}` covers **192 / 200 files (96 %)**; the eight D=248 files
 are skipped. Runtime: ~12 min on the reference hardware.
 
-| Source dataset | Files | Positives | rcf-rs AUC |
-|---|---|---|---|
-| Genesis | 1 | 50 | **0.968** |
-| SMAP | 27 | 6 424 | **0.803** |
-| MSL | 16 | 2 350 | 0.705 |
-| SVDB | 31 | 325 527 | 0.692 |
-| SMD | 22 | 21 145 | 0.618 |
-| PSM | 1 | 24 381 | 0.608 |
-| LTDB | 5 | 77 568 | 0.601 |
-| MITDB | 13 | 111 842 | 0.601 |
-| CreditCard | 1 | 492 | 0.589 |
-| CATSv2 | 6 | 63 600 | 0.580 |
-| Exathlon | 27 | 171 692 | 0.491 |
-| GHL | 25 | 56 569 | 0.454 |
-| TAO | 13 | 10 841 | 0.451 |
-| GECCO | 1 | 1 726 | 0.412 |
-| Daphnet | 1 | 2 306 | 0.309 |
-| SWaT | 2 | 52 104 | 0.282 |
-| **aggregate weighted** | **192** | **928 617** | **0.584** |
+Per-dataset ROC-AUC (weighted by positive count) against
+`randomcutforest-java` 4.4.0 on the same corpus. rrcf 0.4.4 was
+benched with the same protocol
+(`scripts/tsb_ad/bench_rrcf_tsb_ad_m.py`, parallel across files)
+but wall-time is prohibitive on the full corpus — ~3–4 h at
+14 workers / `--max-eval 1500`. Numbers are left for the reader
+to reproduce; the script is provided for reproducibility.
 
-`tests/tsb_ad_m.rs` pins aggregate floor at 0.55 — regression
-guard, not a quality claim.
+| Source dataset | Files | rcf-rs `score()` | rcf-rs `score_codisp()` | AWS Java `getAnomalyScore` |
+|---|---|---|---|---|
+| Genesis | 1 | 0.968 | **0.991** | 0.982 |
+| SMAP | 27 | 0.803 | **0.823** | 0.805 |
+| SMD | 22 | 0.618 | 0.760 | **0.806** |
+| MSL | 16 | 0.705 | 0.746 | **0.762** |
+| SVDB | 31 | 0.692 | 0.737 | **0.757** |
+| LTDB | 5 | 0.601 | **0.755** | **0.755** |
+| Exathlon | 27 | 0.491 | **0.894** | 0.865 |
+| MITDB | 13 | 0.601 | **0.678** | 0.660 |
+| PSM | 1 | 0.608 | 0.595 | **0.611** |
+| CATSv2 | 6 | **0.580** | 0.547 | 0.547 |
+| CreditCard | 1 | 0.589 | 0.679 | **0.693** |
+| Daphnet | 1 | 0.309 | 0.885 | **0.944** |
+| GECCO | 1 | 0.412 | 0.523 | **0.594** |
+| GHL | 25 | 0.454 | **0.461** | 0.419 |
+| OPPORTUNITY | 8 (skipped D=248) | — | — | 0.298 |
+| SWaT | 2 | 0.282 | 0.825 | 0.825 |
+| TAO | 13 | 0.451 | 0.453 | **0.471** |
+| **aggregate weighted** | **192 / 200** | **0.584** | **0.768** | **0.753** |
+
+- **rcf-rs `score()`** — isolation depth, rayon-parallel, full
+  eval scan. Same fast API eBPFsentinel ships on the hot path.
+  `tests/tsb_ad_m.rs::tsb_ad_m_aggregate_auc_above_floor` pins
+  the aggregate floor at 0.55 — regression guard, not a quality
+  claim.
+- **rcf-rs `score_codisp()`** — probe-based codisp walk (leaf → root,
+  `max(sibling.mass / subtree.mass)`), sequential per tree.
+  Stride-subsampled to 50 000 eval rows per file (const
+  `CODISP_MAX_EVAL`). Rayon-parallel across files so a
+  14 C / 20 T host covers the 192-file corpus in ~5 min.
+  Directly comparable to the AWS Java / rrcf semantic; leads
+  aggregate **0.768** vs AWS Java 0.753.
+  `tests/tsb_ad_m.rs::tsb_ad_m_codisp_aggregate_auc_above_floor`.
+- **AWS Java `getAnomalyScore()`** — codisp-like, stride-
+  subsampled to 50 000 eval rows per file (essentially full-scan
+  for 95 % of the corpus). Covers all 200 files including the
+  eight D=248 OPPORTUNITY series the const-generic whitelist
+  skips.
 
 Caveats:
-
-- Plain point-wise ROC-AUC; the official TSB-AD leaderboard ranks
-  on **VUS-PR** (Paparrizos et al. 2022) which integrates
-  range-based precision/recall across a sliding window. For an
-  apples-to-apples submission, export raw score streams and run
-  [TheDatumOrg/VUS](https://github.com/TheDatumOrg/VUS) offline.
-- RCF is classical by design — transformer-based SOTA (TimesNet,
-  Anomaly Transformer) outscores it on heavy-physics datasets
-  (SWaT, Daphnet, GECCO) where the anomaly signature is deep in
-  higher-order cross-channel structure. RCF stays competitive on
-  Genesis / SMAP / MSL / SVDB where per-dim statistical drift is
-  the dominant signature — closer to eBPFsentinel's production
-  feature mix (rate, ratio, entropy, cardinality).
+- **Plain point-wise ROC-AUC**; the official TSB-AD leaderboard
+  ranks on **VUS-PR** (Paparrizos et al. 2022) which integrates
+  range-based precision / recall across a sliding window.
+- **RCF is classical by design** — transformer-based SOTA
+  (TimesNet, Anomaly Transformer) outscores every impl here on
+  heavy-physics datasets (SWaT, Daphnet, GECCO) where the anomaly
+  signature lives in higher-order cross-channel structure. RCF
+  stays competitive on Genesis / SMAP / MSL / SVDB where per-dim
+  statistical drift dominates — closer to eBPFsentinel's
+  production feature mix (rate, ratio, entropy, cardinality).
 
 Reproduce:
 
@@ -289,4 +311,10 @@ Reproduce:
 scripts/tsb_ad/fetch.sh /tmp/tsb-ad
 RCF_TSB_AD_M_PATH=/tmp/tsb-ad/TSB-AD-M \
     cargo test --release --test tsb_ad_m --all-features -- --ignored --nocapture
+python3 scripts/tsb_ad/bench_rrcf_tsb_ad_m.py \
+    --dir /tmp/tsb-ad/TSB-AD-M --max-eval 1500 --workers "$(nproc)"
+javac -cp /tmp/aws-rcf-central/randomcutforest-core-4.4.0.jar \
+    scripts/tsb_ad/RcfBenchTsbAdM.java
+java -cp scripts/tsb_ad:/tmp/aws-rcf-central/randomcutforest-core-4.4.0.jar \
+    RcfBenchTsbAdM /tmp/tsb-ad/TSB-AD-M 50000
 ```

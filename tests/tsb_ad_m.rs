@@ -37,12 +37,13 @@
 //! monomorphisation cost stays bounded; eBPFsentinel's production
 //! feature-vector dim is typically ≤ 64 anyway.
 
-#![cfg(feature = "serde_json")]
+#![cfg(all(feature = "serde_json", feature = "parallel"))]
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
 use rcf_rs::{AnomalyScore, ForestBuilder};
 
 /// Fraction of the `tr_<N>` warm split reserved to compute the
@@ -61,6 +62,13 @@ const SEED: u64 = 2026;
 /// meaningful — below this the file is reported but excluded from
 /// the aggregate.
 const MIN_POSITIVES: u64 = 5;
+/// Stride-subsample cap for the codisp variant — matches the AWS
+/// Java bench's max-eval so the two scorers land on identical row
+/// coverage. `score_codisp()` is ~30× slower than `score()` and
+/// mutates the forest per probe, so scanning 100 % of eval rows on
+/// a ~1 M-point corpus is session-infeasible. Stride-subsampling is
+/// uniform across time.
+const CODISP_MAX_EVAL: usize = 50_000;
 
 /// Parsed filename metadata: source dataset name, dim, train-split
 /// end index (`tr_<N>`), index of the first anomaly (`1st_<N>`).
@@ -184,16 +192,31 @@ fn auc(scores: &[f64], labels: &[u8]) -> f64 {
     auc_val
 }
 
+/// Which scoring API to exercise per-point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scorer {
+    /// Isolation-depth `score()` — non-mutating, rayon-parallel,
+    /// full eval scan. Production hot-path API.
+    IsolationDepth,
+    /// Probe-based `score_codisp()` — inserts + walks leaf→root +
+    /// deletes per call. ~30× slower than `score()`, matches the
+    /// AWS Java `getAnomalyScore()` / rrcf `codisp()` semantic.
+    /// Stride-subsampled eval to `CODISP_MAX_EVAL` rows.
+    Codisp,
+}
+
 /// Core per-file scoring pipeline, specialised on `D`. Reads the
 /// row-major `features` matrix, normalises per-dim against the
 /// train-split mean / stddev, warms the forest on the train split,
-/// then scores the eval split with `score()` (frozen baseline). The
-/// raw scores are EMA-smoothed before AUC is computed.
+/// then scores the eval split (frozen baseline). Raw scores are
+/// EMA-smoothed before AUC is computed. `scorer` selects between
+/// isolation depth (full scan) and codisp (stride-subsampled).
 fn score_file<const D: usize>(
     features: &[f64],
     labels: &[u8],
     dim: usize,
     train_end: usize,
+    scorer: Scorer,
 ) -> (f64, u64, usize) {
     assert_eq!(dim, D, "score_file<D>: D mismatch");
     let n = labels.len();
@@ -246,16 +269,31 @@ fn score_file<const D: usize>(
         let _ = forest.update(p);
     }
 
-    // Frozen-baseline eval.
-    let mut raw_scores = Vec::with_capacity(n - train_end);
-    let mut eval_labels = Vec::with_capacity(n - train_end);
-    for (r, &label) in labels.iter().enumerate().take(n).skip(train_end) {
+    // Build eval index set: codisp is stride-subsampled, isolation
+    // depth scans the full eval tail.
+    let eval_indices: Vec<usize> = match scorer {
+        Scorer::IsolationDepth => (train_end..n).collect(),
+        Scorer::Codisp => {
+            let eval_n = n - train_end;
+            let stride = eval_n.div_ceil(CODISP_MAX_EVAL).max(1);
+            (train_end..n).step_by(stride).collect()
+        }
+    };
+
+    let mut raw_scores = Vec::with_capacity(eval_indices.len());
+    let mut eval_labels = Vec::with_capacity(eval_indices.len());
+    for &r in &eval_indices {
         let p = read_point(r);
-        let s: AnomalyScore = forest
-            .score(&p)
-            .unwrap_or_else(|_| AnomalyScore::new(0.0).expect("zero valid"));
+        let s: AnomalyScore = match scorer {
+            Scorer::IsolationDepth => forest
+                .score(&p)
+                .unwrap_or_else(|_| AnomalyScore::new(0.0).expect("zero valid")),
+            Scorer::Codisp => forest
+                .score_codisp(&p)
+                .unwrap_or_else(|_| AnomalyScore::new(0.0).expect("zero valid")),
+        };
         raw_scores.push(f64::from(s));
-        eval_labels.push(label);
+        eval_labels.push(labels[r]);
     }
 
     // EMA-smoothed stream.
@@ -280,11 +318,12 @@ fn dispatch(
     labels: &[u8],
     dim: usize,
     train_end: usize,
+    scorer: Scorer,
 ) -> Option<(f64, u64, usize)> {
     macro_rules! arm {
         ($($d:literal),* $(,)?) => {
             match dim {
-                $($d => Some(score_file::<$d>(features, labels, dim, train_end)),)*
+                $($d => Some(score_file::<$d>(features, labels, dim, train_end, scorer)),)*
                 _ => None,
             }
         };
@@ -292,9 +331,11 @@ fn dispatch(
     arm!(2, 3, 7, 8, 9, 12, 16, 17, 18, 19, 25, 29, 31, 38, 51, 55, 66)
 }
 
-#[test]
-#[ignore = "requires RCF_TSB_AD_M_PATH pointing at the extracted TSB-AD-M corpus"]
-fn tsb_ad_m_aggregate_auc_above_floor() {
+/// Shared test body — iterate the corpus with the selected scorer,
+/// print the per-dataset AUC breakdown, return the aggregate
+/// positive-weighted AUC. The two `#[test]` entry points differ
+/// only in the scorer variant and the floor they assert.
+fn run_corpus(scorer: Scorer, label: &str) -> f64 {
     let Some(root_path) = root() else {
         panic!(
             "RCF_TSB_AD_M_PATH not set — run scripts/tsb_ad/fetch.sh and \
@@ -319,29 +360,40 @@ fn tsb_ad_m_aggregate_auc_above_floor() {
         root_path.display()
     );
 
+    // Parallelise at the file level — each file owns an independent
+    // `RandomCutForest`, so rayon can fan out across cores. The
+    // per-file pipeline is still sequential (const-generic D dispatch,
+    // `score_codisp` mutates the forest serially per probe), but 14
+    // files running concurrently on a 14C / 20T host dominates the
+    // outer loop cost.
+    let paths: Vec<_> = entries.iter().map(std::fs::DirEntry::path).collect();
+    let outputs: Vec<Result<FileResult, usize>> = paths
+        .par_iter()
+        .filter_map(|path| {
+            let (features, labels, dim) = load_csv(path);
+            let meta = parse_meta(path, dim)?;
+            let res = dispatch(&features, &labels, dim, meta.train_end, scorer);
+            Some(match res {
+                Some((auc_val, positives, eval_len)) => Ok(FileResult {
+                    file: meta.file,
+                    dataset: meta.dataset,
+                    dim,
+                    auc: auc_val,
+                    positives,
+                    eval_len,
+                }),
+                None => Err(dim),
+            })
+        })
+        .collect();
+
     let mut results: Vec<FileResult> = Vec::new();
     let mut skipped_dim: BTreeMap<usize, usize> = BTreeMap::new();
-
-    for entry in &entries {
-        let path = entry.path();
-        let (features, labels, dim) = load_csv(&path);
-        let Some(meta) = parse_meta(&path, dim) else {
-            continue;
-        };
-        let Some((auc_val, positives, eval_len)) =
-            dispatch(&features, &labels, dim, meta.train_end)
-        else {
-            *skipped_dim.entry(dim).or_default() += 1;
-            continue;
-        };
-        results.push(FileResult {
-            file: meta.file.clone(),
-            dataset: meta.dataset.clone(),
-            dim,
-            auc: auc_val,
-            positives,
-            eval_len,
-        });
+    for out in outputs {
+        match out {
+            Ok(r) => results.push(r),
+            Err(d) => *skipped_dim.entry(d).or_default() += 1,
+        }
     }
 
     // Per-dataset aggregate (weighted by positive count).
@@ -357,7 +409,7 @@ fn tsb_ad_m_aggregate_auc_above_floor() {
         }
     }
 
-    println!("\nTSB-AD-M per-dataset AUC (weighted by positives, files counted):");
+    println!("\nTSB-AD-M [{label}] per-dataset AUC (weighted by positives, files counted):");
     let mut overall_weighted = 0.0_f64;
     let mut overall_positives = 0_u64;
     let mut overall_files = 0_usize;
@@ -377,7 +429,7 @@ fn tsb_ad_m_aggregate_auc_above_floor() {
         overall_weighted / overall_positives as f64
     };
     println!(
-        "\naggregate weighted AUC (positive-weighted): {overall_auc:.3} \
+        "\n[{label}] aggregate weighted AUC: {overall_auc:.3} \
          across {overall_files} files / {overall_positives} positives"
     );
 
@@ -388,11 +440,29 @@ fn tsb_ad_m_aggregate_auc_above_floor() {
         }
         println!();
     }
+    overall_auc
+}
 
+#[test]
+#[ignore = "requires RCF_TSB_AD_M_PATH pointing at the extracted TSB-AD-M corpus"]
+fn tsb_ad_m_aggregate_auc_above_floor() {
+    let overall_auc = run_corpus(Scorer::IsolationDepth, "score()");
     // Floor is a regression guard on the current pipeline. Adjust
     // only alongside a commit message explaining the detector change.
     assert!(
         overall_auc > 0.55,
         "aggregate weighted AUC = {overall_auc:.3} below floor 0.55"
+    );
+}
+
+#[test]
+#[ignore = "requires RCF_TSB_AD_M_PATH; codisp path is ~30× slower, runs ~1h at CODISP_MAX_EVAL=50k stride"]
+fn tsb_ad_m_codisp_aggregate_auc_above_floor() {
+    let overall_auc = run_corpus(Scorer::Codisp, "score_codisp()");
+    // Codisp floor is independent of the isolation-depth floor —
+    // mutation-per-probe plus stride subsampling drifts the number.
+    assert!(
+        overall_auc > 0.55,
+        "codisp aggregate weighted AUC = {overall_auc:.3} below floor 0.55"
     );
 }

@@ -19,10 +19,15 @@ Zip is ~515 MB; extracted corpus ~1.6 GB.
 ## Run
 
 ```bash
-cargo test --test tsb_ad_m --all-features -- --ignored --nocapture
-```
+# isolation-depth `score()` — ~12 min on reference hardware
+cargo test --release --test tsb_ad_m --all-features \
+    tsb_ad_m_aggregate_auc_above_floor -- --ignored --nocapture
 
-Expect ~8–15 min on the reference hardware (13th-gen i7, 14C / 20T).
+# probe-based `score_codisp()` — stride-subsampled to 50k eval
+# rows per file, ~1 h runtime (≈ 30× slower than `score()`).
+cargo test --release --test tsb_ad_m --all-features \
+    tsb_ad_m_codisp_aggregate_auc_above_floor -- --ignored --nocapture
+```
 
 ## Pipeline
 
@@ -60,6 +65,38 @@ The 17-value const-generic whitelist covers **192 / 200** files
 248-dim forest only for 4 % of the corpus inflates compile time
 without matching any plausible eBPFsentinel feature vector (native
 prod dims are typically ≤ 64).
+
+## External baselines
+
+The same protocol runs against rrcf (Python) and AWS Java so the
+three implementations land in the same AUC table:
+
+```bash
+# AWS randomcutforest-java 4.4.0 via Maven Central jar.
+# `getAnomalyScore()` is codisp-like — directly comparable to
+# rcf-rs's `score_codisp()`. Runtime: ~10 min on reference host.
+javac -cp /tmp/aws-rcf-central/randomcutforest-core-4.4.0.jar \
+    scripts/tsb_ad/RcfBenchTsbAdM.java
+java -cp scripts/tsb_ad:/tmp/aws-rcf-central/randomcutforest-core-4.4.0.jar \
+    RcfBenchTsbAdM /tmp/tsb-ad/TSB-AD-M 50000
+
+# rrcf — `codisp()` is the only API, insert+walk+forget per
+# probe. Parallelise across files (GIL bypass via multiprocessing)
+# but wall-time still runs ~3–4 h at 14 workers / max-eval 1500
+# on the full corpus; provided for reproducibility, not in the
+# performance tables.
+python3 scripts/tsb_ad/bench_rrcf_tsb_ad_m.py \
+    --dir /tmp/tsb-ad/TSB-AD-M --max-eval 1500 --workers "$(nproc)"
+```
+
+For apples-to-apples codisp-vs-codisp on the rcf-rs side,
+run the second integration test:
+
+```bash
+RCF_TSB_AD_M_PATH=/tmp/tsb-ad/TSB-AD-M cargo test --release \
+    --test tsb_ad_m --all-features \
+    tsb_ad_m_codisp_aggregate_auc_above_floor -- --ignored --nocapture
+```
 
 ## Metric caveat
 

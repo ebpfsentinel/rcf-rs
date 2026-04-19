@@ -497,11 +497,14 @@ corpora (separable clusters > 0.95, transition > 0.90).
 `tests/nab.rs` (ignored by default, needs `RCF_NAB_PATH`) pins
 the NAB `realKnownCause` weighted aggregate at 0.70 via the
 lag=32 + zscore + smooth(0.02) pipeline.
-`tests/tsb_ad_m.rs` (ignored, needs `RCF_TSB_AD_M_PATH`) pins the
-TSB-AD multivariate track aggregate at 0.55 via per-dim z-score
-+ frozen-baseline `score()` — exercises the native multivariate
-path across 192 / 200 files spanning D ∈ {2 .. 66}. See
-`docs/performance.md` for the per-source breakdown.
+`tests/tsb_ad_m.rs` (ignored, needs `RCF_TSB_AD_M_PATH`) exercises
+the native multivariate path across 192 / 200 files spanning
+D ∈ {2 .. 66}. Two test functions: `tsb_ad_m_aggregate_auc_above_floor`
+runs the fast `score()` path, `tsb_ad_m_codisp_aggregate_auc_above_floor`
+runs `score_codisp()` stride-subsampled to 50 k eval rows per file
+for direct parity with the AWS Java / rrcf codisp semantic. Both
+pin a 0.55 aggregate floor. See `docs/performance.md` for the
+per-source breakdown.
 
 ### Property-based fuzz suite
 
