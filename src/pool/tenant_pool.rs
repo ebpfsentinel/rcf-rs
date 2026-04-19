@@ -317,6 +317,44 @@ where
             .score_many_early_term(points, config)
     }
 
+    /// Cross-tenant what-if scoring — pipe the **same** `point`
+    /// through every resident tenant's detector and collect
+    /// `(key, grade)` pairs sorted by descending grade.
+    ///
+    /// Primary use case: MSSP / threat-intel lateral scan.
+    /// Analyst investigates an anomaly on tenant A, wants to see
+    /// which other tenants' baselines flag the same observation —
+    /// common pattern for supply-chain / shared-infra compromises.
+    ///
+    /// Tenants currently in the warming-up window
+    /// ([`crate::AnomalyGrade::ready`] returns `false`) are
+    /// skipped so callers only see confidence-bearing grades.
+    /// Does **not** auto-create any tenant. Does not mutate
+    /// detector state (read-only path).
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`crate::ThresholdedForest::score_only`] errors.
+    pub fn score_across_tenants(
+        &self,
+        point: &[f64; D],
+    ) -> RcfResult<Vec<(K, AnomalyGrade)>> {
+        let mut out: Vec<(K, AnomalyGrade)> = Vec::with_capacity(self.forests.len());
+        for (key, slot) in &self.forests {
+            let grade = slot.forest.score_only(point)?;
+            if !grade.ready() {
+                continue;
+            }
+            out.push((key.clone(), grade));
+        }
+        out.sort_by(|a, b| {
+            b.1.grade()
+                .partial_cmp(&a.1.grade())
+                .unwrap_or(core::cmp::Ordering::Equal)
+        });
+        Ok(out)
+    }
+
     /// Pairwise similarity between every tenant in the pool,
     /// computed on each tenant's anomaly-score EMA stats
     /// (`mean`, `stddev`). Tenants with fewer than
@@ -826,6 +864,35 @@ mod tests {
         let mut ts = p.tenants();
         ts.sort_unstable();
         assert_eq!(ts, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn score_across_tenants_ranks_desc_and_skips_cold() {
+        let mut p = TenantForestPool::<&'static str, 2>::new(8, factory_2d()).unwrap();
+        // Warm tenants a, b, c past min_observations=4.
+        for i in 0_u32..16 {
+            let v = f64::from(i) * 0.01;
+            p.process(&"a", [v, v]).unwrap();
+            p.process(&"b", [v + 5.0, v + 5.0]).unwrap();
+            p.process(&"c", [v + 100.0, v + 100.0]).unwrap();
+        }
+        // Tenant d: warming up only.
+        p.process(&"d", [0.5, 0.5]).unwrap();
+
+        let out = p.score_across_tenants(&[50.0, 50.0]).unwrap();
+        // d skipped (not ready).
+        assert!(out.iter().all(|(k, _)| *k != "d"));
+        // Sorted desc.
+        for pair in out.windows(2) {
+            assert!(pair[0].1.grade() >= pair[1].1.grade());
+        }
+    }
+
+    #[test]
+    fn score_across_tenants_empty_pool_returns_empty() {
+        let p = TenantForestPool::<&'static str, 2>::new(4, factory_2d()).unwrap();
+        let out = p.score_across_tenants(&[0.0, 0.0]).unwrap();
+        assert!(out.is_empty());
     }
 
     #[test]

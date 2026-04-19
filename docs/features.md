@@ -148,6 +148,18 @@ in-process bin + percentile export.
 
 Example: `examples/observability.rs`.
 
+## Cross-tenant what-if
+
+`TenantForestPool::score_across_tenants(&point)` pipes the **same**
+probe through every resident tenant's detector and returns a
+`Vec<(K, AnomalyGrade)>` sorted by descending grade. Warming-up
+tenants are dropped (only confidence-bearing verdicts surface).
+Intended for MSSP / threat-intel lateral scans: *"does this IOC
+also flag on other tenants?"* Read-only — no tenant creation, no
+state mutation.
+
+Example: `examples/cross_tenant.rs`.
+
 ## Tenant similarity index
 
 `TenantForestPool::similarity_matrix(min_obs)` /
