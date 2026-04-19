@@ -262,14 +262,8 @@ mod tests {
     #[test]
     fn anomaly_grade_severity_uses_raw_score() {
         let b = SeverityBands::default();
-        let grade = AnomalyGrade::new(
-            AnomalyScore::new(6.0).unwrap(),
-            4.5,
-            1.0,
-            true,
-            true,
-        )
-        .unwrap();
+        let grade =
+            AnomalyGrade::new(AnomalyScore::new(6.0).unwrap(), 4.5, 1.0, true, true).unwrap();
         assert_eq!(grade.severity(&b), Severity::Critical);
     }
 

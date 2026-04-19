@@ -130,10 +130,12 @@ fn pool_delete_before_is_per_tenant() {
     })
     .unwrap();
     for ts in 0_u64..8 {
-        pool.process_at(&"a", [0.1 + ts as f64 * 0.01, 0.1], ts).unwrap();
+        pool.process_at(&"a", [0.1 + ts as f64 * 0.01, 0.1], ts)
+            .unwrap();
     }
     for ts in 0_u64..8 {
-        pool.process_at(&"b", [0.1 + ts as f64 * 0.01, 0.2], ts).unwrap();
+        pool.process_at(&"b", [0.1 + ts as f64 * 0.01, 0.2], ts)
+            .unwrap();
     }
     let removed_a = pool.delete_before(&"a", 4).unwrap();
     assert!(removed_a > 0);

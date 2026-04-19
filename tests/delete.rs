@@ -17,9 +17,7 @@
 
 #![allow(clippy::cast_precision_loss, clippy::float_cmp)]
 
-use rcf_rs::{
-    ForestBuilder, TenantForestPool, ThresholdedForestBuilder,
-};
+use rcf_rs::{ForestBuilder, TenantForestPool, ThresholdedForestBuilder};
 
 #[test]
 fn update_indexed_returns_fresh_indices() {
@@ -49,7 +47,10 @@ fn delete_removes_point_from_trees() {
         f.update([v, v]).unwrap();
     }
     let was_present = f.delete(idx).unwrap();
-    assert!(was_present, "freshly inserted point should be in at least one tree");
+    assert!(
+        was_present,
+        "freshly inserted point should be in at least one tree"
+    );
     // After delete, the sampler should not list this idx anywhere.
     for (_, sampler, _) in f.trees() {
         assert!(!sampler.contains(idx), "idx should be gone from every tree");

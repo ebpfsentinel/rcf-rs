@@ -12,9 +12,7 @@
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use rcf_rs::{
-    ForestBuilder, PlattCalibrator, PlattFitConfig, RcfError,
-};
+use rcf_rs::{ForestBuilder, PlattCalibrator, PlattFitConfig, RcfError};
 
 #[test]
 fn fit_then_calibrate_separates_classes() {
@@ -69,7 +67,12 @@ fn calibrate_on_forest_scores_stays_in_unit_interval() -> Result<(), RcfError> {
 
     // Probe batch through calibrator.
     let scores: Vec<f64> = (0..64)
-        .map(|_| f64::from(f.score(&[rng.random::<f64>() * 0.1, 0.0, 0.0, 0.0]).unwrap()))
+        .map(|_| {
+            f64::from(
+                f.score(&[rng.random::<f64>() * 0.1, 0.0, 0.0, 0.0])
+                    .unwrap(),
+            )
+        })
         .collect();
     let probs = cal.calibrate_many(&scores);
     for p in probs {
@@ -81,9 +84,7 @@ fn calibrate_on_forest_scores_stays_in_unit_interval() -> Result<(), RcfError> {
 #[cfg(feature = "serde_json")]
 #[test]
 fn calibrator_serde_roundtrips() {
-    let data: Vec<(f64, bool)> = (0..32)
-        .map(|i| (f64::from(i) * 0.1, i >= 16))
-        .collect();
+    let data: Vec<(f64, bool)> = (0..32).map(|i| (f64::from(i) * 0.1, i >= 16)).collect();
     let cal = PlattCalibrator::fit(&data, PlattFitConfig::default()).unwrap();
     let json = serde_json::to_string(&cal).unwrap();
     let back: PlattCalibrator = serde_json::from_str(&json).unwrap();

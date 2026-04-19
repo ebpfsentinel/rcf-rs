@@ -78,7 +78,10 @@ pub struct ThresholdedForest<const D: usize> {
     /// `rcf_threshold_current`, `rcf_grade`) do not duplicate the
     /// forest's counters.
     #[cfg(feature = "std")]
-    #[cfg_attr(feature = "serde", serde(skip, default = "crate::metrics::default_sink"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(skip, default = "crate::metrics::default_sink")
+    )]
     metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
 }
 
@@ -381,10 +384,7 @@ impl<const D: usize> ThresholdedForest<D> {
     /// # Errors
     ///
     /// Same as [`Self::process`].
-    pub fn process_indexed(
-        &mut self,
-        point: [f64; D],
-    ) -> RcfResult<(usize, AnomalyGrade)> {
+    pub fn process_indexed(&mut self, point: [f64; D]) -> RcfResult<(usize, AnomalyGrade)> {
         ensure_finite(&point)?;
 
         let score = match self.forest.score(&point) {
@@ -424,11 +424,7 @@ impl<const D: usize> ThresholdedForest<D> {
     /// # Errors
     ///
     /// Same as [`Self::process`].
-    pub fn process_at(
-        &mut self,
-        point: [f64; D],
-        timestamp: u64,
-    ) -> RcfResult<AnomalyGrade> {
+    pub fn process_at(&mut self, point: [f64; D], timestamp: u64) -> RcfResult<AnomalyGrade> {
         let (_, verdict) = self.process_indexed_at(point, timestamp)?;
         Ok(verdict)
     }

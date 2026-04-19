@@ -13,8 +13,7 @@ use mimalloc::MiMalloc;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rcf_rs::{
-    EarlyTermConfig, ForestBuilder, RandomCutForest, TenantForestPool,
-    ThresholdedForestBuilder,
+    EarlyTermConfig, ForestBuilder, RandomCutForest, TenantForestPool, ThresholdedForestBuilder,
 };
 use std::hint::black_box;
 
@@ -181,8 +180,7 @@ fn build_warm_pool(num_tenants: usize, samples_per_tenant: usize) -> TenantFores
     })
     .expect("pool build");
     let mut rng = ChaCha8Rng::seed_from_u64(2026);
-    let tenant_count =
-        u32::try_from(num_tenants).expect("bench num_tenants fits u32");
+    let tenant_count = u32::try_from(num_tenants).expect("bench num_tenants fits u32");
     for t in 0..tenant_count {
         for _ in 0..samples_per_tenant {
             let p = [
@@ -215,9 +213,7 @@ fn bench_tenant(c: &mut Criterion) {
         });
         group.bench_function(format!("score_across_{n}t"), |b| {
             b.iter(|| {
-                let r = pool
-                    .score_across_tenants(black_box(&probe))
-                    .expect("cross");
+                let r = pool.score_across_tenants(black_box(&probe)).expect("cross");
                 black_box(r);
             });
         });

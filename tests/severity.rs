@@ -12,9 +12,7 @@
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use rcf_rs::{
-    AnomalyScore, ForestBuilder, Severity, SeverityBands, ThresholdedForestBuilder,
-};
+use rcf_rs::{AnomalyScore, ForestBuilder, Severity, SeverityBands, ThresholdedForestBuilder};
 
 #[test]
 fn default_bands_equal_ml_detection_thresholds() {

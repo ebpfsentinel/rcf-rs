@@ -145,7 +145,10 @@ fn score_histogram_bins_streamed_grades() {
     let upper: u64 = h.bins()[mid..].iter().sum();
     assert!(lower > upper);
     let p50 = h.percentile(0.5).unwrap();
-    assert!(p50 < 0.3, "median of bimodal lower mode should be < 0.3, got {p50}");
+    assert!(
+        p50 < 0.3,
+        "median of bimodal lower mode should be < 0.3, got {p50}"
+    );
 }
 
 #[test]

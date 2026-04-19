@@ -148,13 +148,12 @@ impl TestSink {
 impl MetricsSink for TestSink {
     fn inc_counter(&self, name: &str, value: u64) {
         let mut guard = self.inner.lock().unwrap();
-        *guard.counters.entry(name.to_string()).or_insert(0) =
-            guard
-                .counters
-                .get(name)
-                .copied()
-                .unwrap_or(0)
-                .saturating_add(value);
+        *guard.counters.entry(name.to_string()).or_insert(0) = guard
+            .counters
+            .get(name)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(value);
     }
     fn set_gauge(&self, name: &str, value: f64) {
         let mut guard = self.inner.lock().unwrap();

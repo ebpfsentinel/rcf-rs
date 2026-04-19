@@ -92,9 +92,7 @@ fn early_term_score_approximates_full_score() {
 fn empty_forest_returns_error() {
     let f = ForestBuilder::<4>::new().seed(7).build().unwrap();
     let cfg = EarlyTermConfig::default();
-    let err = f
-        .score_early_term(&[0.0, 0.0, 0.0, 0.0], cfg)
-        .unwrap_err();
+    let err = f.score_early_term(&[0.0, 0.0, 0.0, 0.0], cfg).unwrap_err();
     assert!(matches!(err, RcfError::EmptyForest));
 }
 

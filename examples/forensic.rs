@@ -46,7 +46,8 @@ fn main() -> Result<(), RcfError> {
     }
     if let Some(idx) = baseline.argmax_abs_zscore() {
         println!();
-        println!("driver dim: {label} (|z| = {z:.2})",
+        println!(
+            "driver dim: {label} (|z| = {z:.2})",
             label = labels[idx],
             z = baseline.zscore[idx].abs(),
         );

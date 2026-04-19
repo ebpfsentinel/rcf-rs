@@ -48,9 +48,7 @@ fn main() -> Result<(), RcfError> {
         let raw: f64 = grade.score().into();
         let sev = grade.severity(&bands);
         let should_page = sev >= Severity::High;
-        println!(
-            "  {name:<16} raw = {raw:>6.3}  severity = {sev:<8}  page_oncall = {should_page}",
-        );
+        println!("  {name:<16} raw = {raw:>6.3}  severity = {sev:<8}  page_oncall = {should_page}",);
     }
 
     Ok(())

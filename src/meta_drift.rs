@@ -185,7 +185,10 @@ pub struct MetaDriftDetector {
     /// Observability sink — emits the CUSUM accumulators + fire
     /// counter. Defaults to [`crate::NoopSink`].
     #[cfg(feature = "std")]
-    #[cfg_attr(feature = "serde", serde(skip, default = "crate::metrics::default_sink"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(skip, default = "crate::metrics::default_sink")
+    )]
     metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
 }
 
@@ -317,7 +320,8 @@ impl MetaDriftDetector {
             use crate::metrics::names;
             self.metrics
                 .observe_histogram(names::DRIFT_S_HIGH, self.s_high);
-            self.metrics.observe_histogram(names::DRIFT_S_LOW, self.s_low);
+            self.metrics
+                .observe_histogram(names::DRIFT_S_LOW, self.s_low);
             if drift.is_some() {
                 self.metrics.inc_counter(names::DRIFT_FIRES_TOTAL, 1);
             }

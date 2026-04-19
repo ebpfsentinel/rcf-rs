@@ -35,10 +35,16 @@ fn ranks_and_filters_warming_up() {
     for _ in 0..64 {
         pool.process(&"a", [rng.random::<f64>() * 0.1, rng.random::<f64>() * 0.1])
             .unwrap();
-        pool.process(&"b", [10.0 + rng.random::<f64>(), 10.0 + rng.random::<f64>()])
-            .unwrap();
-        pool.process(&"c", [50.0 + rng.random::<f64>(), 50.0 + rng.random::<f64>()])
-            .unwrap();
+        pool.process(
+            &"b",
+            [10.0 + rng.random::<f64>(), 10.0 + rng.random::<f64>()],
+        )
+        .unwrap();
+        pool.process(
+            &"c",
+            [50.0 + rng.random::<f64>(), 50.0 + rng.random::<f64>()],
+        )
+        .unwrap();
     }
     // d — only 4 observations, still warming-up.
     for _ in 0..4 {

@@ -85,8 +85,14 @@ fn main() -> Result<(), RcfError> {
     let et_elapsed = t0.elapsed();
 
     println!("== 1000 probes, 100-tree forest ==");
-    println!("  full-ensemble  : {full_elapsed:?}  mean_score={:.4}", full_acc / 1000.0);
-    println!("  early-term     : {et_elapsed:?}  mean_score={:.4}", et_acc / 1000.0);
+    println!(
+        "  full-ensemble  : {full_elapsed:?}  mean_score={:.4}",
+        full_acc / 1000.0
+    );
+    println!(
+        "  early-term     : {et_elapsed:?}  mean_score={:.4}",
+        et_acc / 1000.0
+    );
     println!();
     println!("  early-stop rate : {early_stops}/1000");
     #[allow(clippy::cast_precision_loss)]

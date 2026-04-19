@@ -29,8 +29,9 @@
 //! [`std::sync::Mutex`] (or a sharded `RwLock` for read-heavy paths)
 //! if multiple threads must share the same pool.
 
+use core::cmp::Ordering;
 use core::hash::Hash;
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
 
 use crate::bootstrap::BootstrapReport;
 use crate::domain::DiVector;
@@ -50,6 +51,44 @@ struct TenantSlot<const D: usize> {
     /// Monotonically increasing tick assigned by the pool on every
     /// access. The minimum tick identifies the LRU victim.
     last_access: u64,
+}
+
+/// Bounded-heap entry used by [`TenantForestPool::most_similar`].
+/// Ordered only by similarity — `K` does not participate so the
+/// heap works without requiring `K: Ord`. Ordering is inverted so
+/// a `BinaryHeap` (max-heap by default) behaves as a min-heap on
+/// similarity: `peek` returns the entry to evict when a better
+/// candidate arrives.
+struct MostSimilarHeapEntry<K: Clone> {
+    /// Similarity score in `(0, 1]`.
+    sim: f64,
+    /// Tenant key owning this entry.
+    key: K,
+}
+
+impl<K: Clone> PartialEq for MostSimilarHeapEntry<K> {
+    fn eq(&self, other: &Self) -> bool {
+        self.sim == other.sim
+    }
+}
+
+impl<K: Clone> Eq for MostSimilarHeapEntry<K> {}
+
+impl<K: Clone> PartialOrd for MostSimilarHeapEntry<K> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<K: Clone> Ord for MostSimilarHeapEntry<K> {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        // Inverted: larger `sim` → smaller cmp → sinks in the
+        // default max-heap → `peek` returns smallest sim.
+        other
+            .sim
+            .partial_cmp(&self.sim)
+            .unwrap_or(core::cmp::Ordering::Equal)
+    }
 }
 
 /// Per-tenant pool of [`ThresholdedForest`] detectors.
@@ -335,18 +374,44 @@ where
     /// # Errors
     ///
     /// Propagates [`crate::ThresholdedForest::score_only`] errors.
-    pub fn score_across_tenants(
-        &self,
-        point: &[f64; D],
-    ) -> RcfResult<Vec<(K, AnomalyGrade)>> {
-        let mut out: Vec<(K, AnomalyGrade)> = Vec::with_capacity(self.forests.len());
-        for (key, slot) in &self.forests {
-            let grade = slot.forest.score_only(point)?;
-            if !grade.ready() {
-                continue;
-            }
-            out.push((key.clone(), grade));
-        }
+    pub fn score_across_tenants(&self, point: &[f64; D]) -> RcfResult<Vec<(K, AnomalyGrade)>>
+    where
+        K: Send + Sync,
+    {
+        #[cfg(feature = "parallel")]
+        let collected: RcfResult<Vec<Option<(K, AnomalyGrade)>>> = {
+            use rayon::prelude::*;
+            // Snapshot into a Vec of references so rayon can split.
+            let entries: Vec<(&K, &ThresholdedForest<D>)> = self
+                .forests
+                .iter()
+                .map(|(k, slot)| (k, slot.forest.as_ref()))
+                .collect();
+            entries
+                .par_iter()
+                .map(|(k, f)| -> RcfResult<Option<(K, AnomalyGrade)>> {
+                    let grade = f.score_only(point)?;
+                    if !grade.ready() {
+                        return Ok(None);
+                    }
+                    Ok(Some(((*k).clone(), grade)))
+                })
+                .collect()
+        };
+        #[cfg(not(feature = "parallel"))]
+        let collected: RcfResult<Vec<Option<(K, AnomalyGrade)>>> = self
+            .forests
+            .iter()
+            .map(|(k, slot)| -> RcfResult<Option<(K, AnomalyGrade)>> {
+                let grade = slot.forest.score_only(point)?;
+                if !grade.ready() {
+                    return Ok(None);
+                }
+                Ok(Some((k.clone(), grade)))
+            })
+            .collect();
+
+        let mut out: Vec<(K, AnomalyGrade)> = collected?.into_iter().flatten().collect();
         out.sort_by(|a, b| {
             b.1.grade()
                 .partial_cmp(&a.1.grade())
@@ -367,7 +432,10 @@ where
     /// `key_a < key_b` ordering not guaranteed — callers that care
     /// about a canonical order should sort their own slice.
     #[must_use]
-    pub fn similarity_matrix(&self, min_observations: u64) -> Vec<(K, K, f64)> {
+    pub fn similarity_matrix(&self, min_observations: u64) -> Vec<(K, K, f64)>
+    where
+        K: Send + Sync,
+    {
         let tenants: Vec<(&K, &ThresholdedForest<D>)> = self
             .forests
             .iter()
@@ -379,19 +447,48 @@ where
                 }
             })
             .collect();
-        let mut out = Vec::with_capacity(tenants.len() * tenants.len() / 2);
-        for i in 0..tenants.len() {
-            for j in (i + 1)..tenants.len() {
-                let (k_a, f_a) = tenants[i];
-                let (k_b, f_b) = tenants[j];
-                let dm = f_a.stats().mean() - f_b.stats().mean();
-                let ds = f_a.stats().stddev() - f_b.stats().stddev();
-                let dist = (dm * dm + ds * ds).sqrt();
-                let sim = (-dist).exp();
-                out.push((k_a.clone(), k_b.clone(), sim));
+        let n = tenants.len();
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            // Enumerate pairs sequentially (cheap — `n² / 2` usize
+            // tuples), par-iterate the work. Keeps `tenants`
+            // borrowed throughout instead of moving it into nested
+            // closures.
+            let mut pairs: Vec<(usize, usize)> = Vec::with_capacity(n * n / 2);
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    pairs.push((i, j));
+                }
             }
+            pairs
+                .par_iter()
+                .map(|&(i, j)| {
+                    let (k_a, f_a) = tenants[i];
+                    let (k_b, f_b) = tenants[j];
+                    let dm = f_a.stats().mean() - f_b.stats().mean();
+                    let ds = f_a.stats().stddev() - f_b.stats().stddev();
+                    let dist = (dm * dm + ds * ds).sqrt();
+                    (k_a.clone(), k_b.clone(), (-dist).exp())
+                })
+                .collect()
         }
-        out
+        #[cfg(not(feature = "parallel"))]
+        {
+            let mut out = Vec::with_capacity(n * n / 2);
+            for (i, &(k_a, f_a)) in tenants.iter().enumerate() {
+                let mean_a = f_a.stats().mean();
+                let stddev_a = f_a.stats().stddev();
+                for &(k_b, f_b) in tenants.iter().skip(i + 1) {
+                    let dm = mean_a - f_b.stats().mean();
+                    let ds = stddev_a - f_b.stats().stddev();
+                    let dist = (dm * dm + ds * ds).sqrt();
+                    out.push((k_a.clone(), k_b.clone(), (-dist).exp()));
+                }
+            }
+            out
+        }
     }
 
     /// Top-`n` tenants most similar to `key`, sorted by descending
@@ -401,12 +498,7 @@ where
     ///
     /// See [`Self::similarity_matrix`] for the similarity metric.
     #[must_use]
-    pub fn most_similar(
-        &self,
-        key: &K,
-        top_n: usize,
-        min_observations: u64,
-    ) -> Vec<(K, f64)> {
+    pub fn most_similar(&self, key: &K, top_n: usize, min_observations: u64) -> Vec<(K, f64)> {
         let Some(ref_slot) = self.forests.get(key) else {
             return Vec::new();
         };
@@ -414,28 +506,47 @@ where
         if ref_stats.observations() < min_observations {
             return Vec::new();
         }
-        let mut pairs: Vec<(K, f64)> = self
-            .forests
-            .iter()
-            .filter_map(|(k, slot)| {
-                if k == key {
-                    return None;
-                }
-                let stats = slot.forest.stats();
-                if stats.observations() < min_observations {
-                    return None;
-                }
-                let dm = ref_stats.mean() - stats.mean();
-                let ds = ref_stats.stddev() - stats.stddev();
-                let dist = (dm * dm + ds * ds).sqrt();
-                Some((k.clone(), (-dist).exp()))
-            })
-            .collect();
-        pairs.sort_unstable_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(core::cmp::Ordering::Equal)
-        });
-        pairs.truncate(top_n);
-        pairs
+        if top_n == 0 {
+            return Vec::new();
+        }
+
+        // Bounded min-heap: keep the `top_n` entries with the
+        // *highest* similarity. `MostSimilarHeapEntry::cmp` is
+        // inverted so `peek` returns the lowest-similarity entry —
+        // the one to evict when a better candidate arrives.
+        // O(N · log top_n) vs. the naive O(N · log N) sort path.
+        let mut heap: BinaryHeap<MostSimilarHeapEntry<K>> = BinaryHeap::with_capacity(top_n + 1);
+        for (k, slot) in &self.forests {
+            if k == key {
+                continue;
+            }
+            let stats = slot.forest.stats();
+            if stats.observations() < min_observations {
+                continue;
+            }
+            let dm = ref_stats.mean() - stats.mean();
+            let ds = ref_stats.stddev() - stats.stddev();
+            let dist = (dm * dm + ds * ds).sqrt();
+            let sim = (-dist).exp();
+            if heap.len() < top_n {
+                heap.push(MostSimilarHeapEntry {
+                    sim,
+                    key: k.clone(),
+                });
+            } else if let Some(min_entry) = heap.peek()
+                && sim > min_entry.sim
+            {
+                heap.pop();
+                heap.push(MostSimilarHeapEntry {
+                    sim,
+                    key: k.clone(),
+                });
+            }
+        }
+        // Drain heap and sort descending for caller-facing output.
+        let mut out: Vec<(K, f64)> = heap.into_iter().map(|e| (e.key, e.sim)).collect();
+        out.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+        out
     }
 
     /// Per-tenant imputation-like forensic baseline. Returns `None`
@@ -462,11 +573,7 @@ where
     /// # Errors
     ///
     /// Propagates [`ThresholdedForest::attribution_many`] errors.
-    pub fn attribution_many(
-        &mut self,
-        key: &K,
-        points: &[[f64; D]],
-    ) -> RcfResult<Vec<DiVector>> {
+    pub fn attribution_many(&mut self, key: &K, points: &[[f64; D]]) -> RcfResult<Vec<DiVector>> {
         self.touch_or_create(key)?.attribution_many(points)
     }
 
@@ -934,7 +1041,10 @@ mod tests {
         // c should rank above b (scores should be closer for same-baseline tenants).
         let c_sim = ranked.iter().find(|(k, _)| *k == "c").unwrap().1;
         let b_sim = ranked.iter().find(|(k, _)| *k == "b").unwrap().1;
-        assert!(c_sim >= b_sim, "c similarity {c_sim} should be >= b {b_sim}");
+        assert!(
+            c_sim >= b_sim,
+            "c similarity {c_sim} should be >= b {b_sim}"
+        );
     }
 
     #[test]

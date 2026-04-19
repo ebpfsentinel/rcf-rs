@@ -276,7 +276,8 @@ impl ScoreHistogram {
             #[allow(clippy::cast_precision_loss)]
             let cum_f = cum as f64;
             if target <= cum_f && *count > 0 {
-                let in_bin = (target - prev_f) / f64::from(u32::try_from(*count).unwrap_or(u32::MAX));
+                let in_bin =
+                    (target - prev_f) / f64::from(u32::try_from(*count).unwrap_or(u32::MAX));
                 #[allow(clippy::cast_precision_loss)]
                 let lo = self.config.min + width * i as f64;
                 return Some(lo + width * in_bin.clamp(0.0, 1.0));

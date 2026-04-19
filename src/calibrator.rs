@@ -150,10 +150,7 @@ impl PlattCalibrator {
     ///   contains non-finite scores.
     /// - [`RcfError::InvalidConfig`] when `config.validate` rejects
     ///   the fit configuration.
-    #[allow(
-        clippy::many_single_char_names,
-        clippy::too_many_lines
-    )] // Platt 1999 nomenclature + unified objective/gradient/line-search block.
+    #[allow(clippy::many_single_char_names, clippy::too_many_lines)] // Platt 1999 nomenclature + unified objective/gradient/line-search block.
     pub fn fit(data: &[(f64, bool)], config: PlattFitConfig) -> RcfResult<Self> {
         config.validate()?;
         if data.is_empty() {
@@ -198,7 +195,10 @@ impl PlattCalibrator {
             num - den
         };
 
-        let targets: Vec<f64> = data.iter().map(|(_, y)| if *y { prior1 } else { prior0 }).collect();
+        let targets: Vec<f64> = data
+            .iter()
+            .map(|(_, y)| if *y { prior1 } else { prior0 })
+            .collect();
 
         let negative_log_likelihood = |a: f64, b: f64| -> f64 {
             let mut fval = 0.0_f64;

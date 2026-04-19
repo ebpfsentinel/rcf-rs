@@ -68,9 +68,7 @@ fn main() -> Result<(), RcfError> {
         let score = f.score(p)?;
         let raw = f64::from(score);
         let prob = calibrator.calibrate(raw);
-        println!(
-            "  {label:<10}  raw_score = {raw:>7.4}  P(anomaly) = {prob:.3}",
-        );
+        println!("  {label:<10}  raw_score = {raw:>7.4}  P(anomaly) = {prob:.3}",);
     }
 
     Ok(())

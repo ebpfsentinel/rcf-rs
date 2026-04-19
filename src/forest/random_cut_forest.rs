@@ -79,7 +79,10 @@ pub struct RandomCutForest<const D: usize> {
     /// shared [`crate::NoopSink`] so a detector without an attached
     /// sink pays only an inlined no-op per event.
     #[cfg(feature = "std")]
-    #[cfg_attr(feature = "serde", serde(skip, default = "crate::metrics::default_sink"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(skip, default = "crate::metrics::default_sink")
+    )]
     metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
     /// Optional per-point timestamps captured by [`Self::update_at`]
     /// / [`Self::update_indexed_at`]. Keyed by the `point_idx`
@@ -452,7 +455,8 @@ impl<const D: usize> RandomCutForest<D> {
 
         self.updates_seen = self.updates_seen.saturating_add(1);
         #[cfg(feature = "std")]
-        self.metrics.inc_counter(crate::metrics::names::UPDATES_TOTAL, 1);
+        self.metrics
+            .inc_counter(crate::metrics::names::UPDATES_TOTAL, 1);
         Ok(new_idx)
     }
 
@@ -524,15 +528,26 @@ impl<const D: usize> RandomCutForest<D> {
         // the caller query so the bit-exact comparison matches.
         let scaled = self.scale_point_copy(point);
         let probe: &[f64; D] = &scaled;
-        let mut candidates: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        // Bitmap dedup — same optimisation as `forensic_baseline`.
+        let capacity = self.point_store.capacity();
+        let mut seen = vec![false; capacity];
         for (_, sampler, _) in &self.trees {
             for idx in sampler.iter_indices() {
-                candidates.insert(idx);
+                if idx < capacity {
+                    seen[idx] = true;
+                }
             }
         }
-        let matching: Vec<usize> = candidates
-            .into_iter()
-            .filter(|&idx| self.point_store.point(idx) == Some(probe))
+        let matching: Vec<usize> = seen
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, hit)| {
+                if *hit && self.point_store.point(idx) == Some(probe) {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
             .collect();
         let mut removed = 0_usize;
         for idx in matching {
@@ -627,7 +642,8 @@ impl<const D: usize> RandomCutForest<D> {
         #[cfg(feature = "std")]
         {
             use crate::metrics::names;
-            self.metrics.observe_histogram(names::SCORE_OBSERVATION, f64::from(score));
+            self.metrics
+                .observe_histogram(names::SCORE_OBSERVATION, f64::from(score));
             #[allow(clippy::cast_precision_loss)]
             self.metrics
                 .observe_histogram(names::EARLY_TERM_TREES, n as f64);
@@ -832,15 +848,22 @@ impl<const D: usize> RandomCutForest<D> {
     ) -> RcfResult<crate::forensic::ForensicBaseline<D>> {
         ensure_finite(point)?;
 
-        // Union of live indices across every reservoir.
-        let mut seen: std::collections::HashSet<usize> =
-            std::collections::HashSet::new();
+        // Bitmap dedup: point_idx is a slot index bounded by
+        // `point_store.capacity()`. A flat `Vec<bool>` sized at
+        // capacity is cache-friendlier than a `HashSet<usize>` when
+        // the same idx appears across multiple reservoirs.
+        let capacity = self.point_store.capacity();
+        let mut seen = vec![false; capacity];
+        let mut unique_count = 0_usize;
         for (_, sampler, _) in &self.trees {
             for idx in sampler.iter_indices() {
-                seen.insert(idx);
+                if idx < capacity && !seen[idx] {
+                    seen[idx] = true;
+                    unique_count = unique_count.saturating_add(1);
+                }
             }
         }
-        if seen.is_empty() {
+        if unique_count == 0 {
             return Err(RcfError::EmptyForest);
         }
 
@@ -849,8 +872,11 @@ impl<const D: usize> RandomCutForest<D> {
         let mut n = 0_usize;
         let mut mean_scaled = [0.0_f64; D];
         let mut m2 = [0.0_f64; D];
-        for idx in &seen {
-            let Some(p_scaled) = self.point_store.point(*idx) else {
+        for (idx, hit) in seen.iter().enumerate() {
+            if !*hit {
+                continue;
+            }
+            let Some(p_scaled) = self.point_store.point(idx) else {
                 continue;
             };
             n = n.saturating_add(1);
@@ -878,11 +904,7 @@ impl<const D: usize> RandomCutForest<D> {
                 .unwrap_or(1.0);
             expected[d] = mean_scaled[d] / scale_d;
             #[allow(clippy::cast_precision_loss)]
-            let variance_scaled = if n >= 2 {
-                m2[d] / (n - 1) as f64
-            } else {
-                0.0
-            };
+            let variance_scaled = if n >= 2 { m2[d] / (n - 1) as f64 } else { 0.0 };
             stddev[d] = variance_scaled.sqrt() / scale_d.abs();
         }
 
