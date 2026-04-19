@@ -31,21 +31,26 @@
 /// Per-dim forensic baseline comparing an observed point against
 /// the forest's current live sample distribution.
 ///
-/// Query result — not persisted. Serde impl is omitted because
-/// `[f64; D]` const-generic arrays are not `Deserialize` without
-/// an adapter crate; callers that need to ship this over the wire
-/// should flatten it into a `Vec<f64>` or per-field JSON.
+/// Serialisable under the `serde` feature through the crate's
+/// `fixed_array_f64` adapter — callers that persist alert records
+/// for NIS2 / SOC2 audit trails can embed this struct directly.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ForensicBaseline<const D: usize> {
     /// Raw query point the baseline was computed against.
+    #[cfg_attr(feature = "serde", serde(with = "crate::serde_util::fixed_array_f64"))]
     pub observed: [f64; D],
     /// Per-dim mean of the live reservoir points (in raw space).
+    #[cfg_attr(feature = "serde", serde(with = "crate::serde_util::fixed_array_f64"))]
     pub expected: [f64; D],
     /// Per-dim population stddev of the live reservoir points.
+    #[cfg_attr(feature = "serde", serde(with = "crate::serde_util::fixed_array_f64"))]
     pub stddev: [f64; D],
     /// `observed − expected` per dim.
+    #[cfg_attr(feature = "serde", serde(with = "crate::serde_util::fixed_array_f64"))]
     pub delta: [f64; D],
     /// Per-dim z-score: `delta / stddev`, `0` when stddev is zero.
+    #[cfg_attr(feature = "serde", serde(with = "crate::serde_util::fixed_array_f64"))]
     pub zscore: [f64; D],
     /// Number of unique live points contributing to the baseline.
     pub live_points: usize,

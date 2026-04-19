@@ -106,6 +106,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic))]
 
 pub mod attribution_stability;
+pub mod audit;
 pub mod bootstrap;
 pub mod calibrator;
 pub mod config;
@@ -123,12 +124,15 @@ pub mod persistence;
 #[cfg(feature = "std")]
 pub mod pool;
 pub mod sampler;
+#[cfg(feature = "serde")]
+pub(crate) mod serde_util;
 pub mod severity;
 pub mod thresholded;
 pub mod tree;
 pub mod visitor;
 
 pub use attribution_stability::AttributionStability;
+pub use audit::{ALERT_RECORD_VERSION, AlertContext, AlertRecord};
 pub use bootstrap::BootstrapReport;
 pub use calibrator::{PlattCalibrator, PlattFitConfig};
 pub use config::{ForestBuilder, RcfConfig};

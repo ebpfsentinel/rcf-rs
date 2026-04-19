@@ -19,7 +19,7 @@ use crate::domain::AnomalyScore;
 use crate::error::{RcfError, RcfResult};
 
 /// Graded anomaly verdict emitted by a thresholded forest.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AnomalyGrade {
     /// Raw RCF anomaly score.

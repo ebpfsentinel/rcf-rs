@@ -43,46 +43,13 @@ use crate::error::{RcfError, RcfResult};
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BoundingBox<const D: usize> {
     /// Per-dimension lower corner. Serialised through
-    /// [`fixed_array_serde`] because `serde` does not yet ship
-    /// `Deserialize` for `[T; N]` at arbitrary `N`.
-    #[cfg_attr(feature = "serde", serde(with = "fixed_array_serde"))]
+    /// [`crate::serde_util::fixed_array_f64`] because `serde` does
+    /// not yet ship `Deserialize` for `[T; N]` at arbitrary `N`.
+    #[cfg_attr(feature = "serde", serde(with = "crate::serde_util::fixed_array_f64"))]
     min: [f64; D],
     /// Per-dimension upper corner.
-    #[cfg_attr(feature = "serde", serde(with = "fixed_array_serde"))]
+    #[cfg_attr(feature = "serde", serde(with = "crate::serde_util::fixed_array_f64"))]
     max: [f64; D],
-}
-
-#[cfg(feature = "serde")]
-mod fixed_array_serde {
-    //! Serde adapter that snapshots `[f64; D]` through a `Vec<f64>`.
-    //! Mirrors the [`crate::forest::point_store`] adapter. Required
-    //! because `serde` only ships `Deserialize` impls for `[T; N]`
-    //! up to `N = 32`.
-    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
-
-    /// Snapshot a `[f64; D]` to a borrowed slice for the
-    /// downstream serializer.
-    pub fn serialize<S, const D: usize>(arr: &[f64; D], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        arr.as_slice().serialize(serializer)
-    }
-
-    /// Reconstitute a `[f64; D]` from a `Vec<f64>` payload, rejecting
-    /// any payload whose length does not match `D`.
-    pub fn deserialize<'de, D2, const D: usize>(deserializer: D2) -> Result<[f64; D], D2::Error>
-    where
-        D2: Deserializer<'de>,
-    {
-        let v: Vec<f64> = Vec::deserialize(deserializer)?;
-        v.try_into().map_err(|got: Vec<f64>| {
-            D2::Error::custom(format!(
-                "BoundingBox dimension mismatch: expected {D}, got {}",
-                got.len()
-            ))
-        })
-    }
 }
 
 impl<const D: usize> BoundingBox<D> {

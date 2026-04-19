@@ -247,6 +247,22 @@ Source: `src/severity.rs`.
 
 Example: `examples/severity.rs`.
 
+### Audit trail (NIS2 / SOC2)
+
+`AlertRecord<K, D>` packages every analytic output (`score`,
+`grade`, `attribution`, `baseline`, `severity`) plus provenance
+(`tenant`, `timestamp_ms`, `point`) into one serialisable struct.
+Build via `AlertRecord::from_forest` (bare RCF) or
+`AlertRecord::from_thresholded` (TRCF); chain `with_severity` to
+attach a band. Versioned through `ALERT_RECORD_VERSION` so
+incompatible schema changes surface at decode time. Emit to a
+SIEM / object-store / WORM log via any `serde` sink — postcard
+for compact per-event bytes, JSON for self-describing records.
+
+Types: `AlertRecord`, `AlertContext`, `ALERT_RECORD_VERSION`.
+
+Source: `src/audit.rs`.
+
 ### Calibrated probability (Platt scaling)
 
 `PlattCalibrator::fit(&[(score, label)], config)` fits a 1-D
