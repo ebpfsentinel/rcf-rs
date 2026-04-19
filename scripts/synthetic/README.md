@@ -59,25 +59,39 @@ java -cp "scripts/synthetic:$JAR" RcfBenchSynthetic \
 
 ## Measured numbers (i7-1370P, synthetic 10k × D=16, 1 % outliers)
 
+**5-seed variance** (seeds 2026–2030), mean ± stddev,
+coefficient of variation in parens. Driven by
+`variance_sweep.sh`.
+
 | Impl | Backend | Updates / s | Scores / s | AUC |
 |---|---|---|---|---|
-| `rcf-rs` 0.0.0-dev | native Rust, rayon-parallel | **32.5k** | **203k** | 1.000 |
-| `randomcutforest-java` 4.4.0 | AWS reference, JVM 26 | 3.9k | 21k | 1.000 |
-| `rrcf` 0.4.4 | Python + NumPy | 0.15k | 184k | 0.992 |
-| `sklearn.IsolationForest` | NumPy + Cython, batch-fit | batch ≈ 48k | 234k | 1.000 |
+| `rcf-rs` 0.0.0-dev | Rust, rayon-parallel | **17 500 ± 1 240** (7 %) | 125 900 ± 1 840 (1.5 %) | 1.000 ± 0 |
+| `randomcutforest-java` 4.4.0 | JVM 26, cold | 2 090 ± 134 (6 %) | 8 870 ± 415 (5 %) | 1.000 ± 0 |
+| `rrcf` 0.4.4 | Python + NumPy | 73 ± 3 (4 %) | 94 150 ± 4 840 (5 %) | 0.992 ± 0 |
+| `sklearn.IsolationForest` | NumPy + Cython | batch-only | **136 300 ± 2 450** (2 %) | 1.000 ± 0 |
 
-- `rcf-rs` inserts ~10× faster than AWS Java and ~220× faster
-  than `rrcf`.
-- Score throughput is within 15 % across all four once each
-  impl runs on its idiomatic fast path.
-- `rcf-rs` score path is pinned by `score_many` (rayon);
-  sklearn by NumPy/Cython SIMD; rrcf by single-process NumPy.
+Ratios (mean / mean):
+
+- **Updates**: `rcf-rs` is ~8.4× faster than AWS Java, ~240×
+  faster than `rrcf`. CVs around 5-7 %; ratios sit well outside
+  the noise floor.
+- **Scores**: sklearn edges `rcf-rs` by 8 % (136 k vs 126 k) —
+  real but small (stddevs combined ≈ 3 k, so the 10 k delta is
+  ~3σ significant). `rrcf` trails `rcf-rs` by ~25 %; AWS Java
+  trails by ~14×.
+- **AUC**: identical within measurement precision across every
+  seed (0.992 for `rrcf`, 1.000 for the other three).
 
 ## Caveats
 
+Machine thermal state varies across runs — earlier single-seed
+cool-CPU measurements landed at ~32 k / 203 k for `rcf-rs`,
+dropping to the ~17 k / 126 k above on the 5-seed run. The
+**ratios are portable, the absolute numbers aren't**.
+
 The Python scripts are best-effort one-shot harnesses — they
 don't pin NumPy BLAS threads, don't warm up, don't stabilise
-CPU frequency. Treat the numbers as "same hardware,
+CPU frequency. Treat absolute numbers as "same hardware,
 order-of-magnitude" only.
 
 ## Why the Python runners are single-process

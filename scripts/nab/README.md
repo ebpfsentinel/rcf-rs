@@ -45,12 +45,20 @@ java -cp "scripts/nab:$JAR" RcfBenchNab /opt/nab
 
 ## Scoring protocol
 
-- **Feature engineering**: 8-lag temporal embedding
-  (`[v_{t-7}, … v_t]`) → `D = 8`. RCF on raw scalars loses most
+- **Feature engineering**: 32-lag temporal embedding
+  (`[v_{t-31}, … v_t]`) → `D = 32`. Longer context absorbs NAB's
+  wide contextual-shift anomalies. RCF on raw scalars loses most
   of its value; lag features give the tree cuts meaningful axes.
-- **Two-phase**: warm on the first 15 % of each series (assumed
-  mostly clean — NAB anomalies are concentrated mid-stream),
-  then score the rest against the frozen forest.
+- **Per-dim z-score** against the warm-phase mean / stddev —
+  NAB series mix wildly different scales (CPU %, taxi counts,
+  temperatures) and RCF cut sampling is range-weighted.
+- **Two-phase**: warm on the first 15 % of each series, then
+  score the rest against the frozen forest — no `update` on
+  eval rows (NAB anomaly windows are days-wide; folding anomaly
+  points back into the reservoir drags the baseline toward
+  them and tanks recall).
+- **EMA smoothing** on the raw score stream (α = 0.02, half-life
+  ~35 steps).
 - **Labels**: timestamp comparison against
   `combined_windows.json` `[start, end]` pairs. A row is
   labelled anomalous iff its timestamp falls inside *any*
@@ -64,28 +72,29 @@ Weighted aggregate AUC on the `realKnownCause` subset (7 files):
 
 | Impl | Aggregate AUC |
 |---|---|
-| AWS Java 4.4.0 | **0.757** |
+| rcf-rs `score_codisp()` | **0.776** |
+| AWS Java 4.4.0 | 0.757 |
 | rrcf 0.4.4 | 0.748 |
-| rcf-rs 0.0.0-dev | 0.615 |
+| rcf-rs `score()` | 0.719 |
 
 Per-file breakdown:
 
-| File | `rcf-rs` | `rrcf` | AWS Java |
-|---|---|---|---|
-| `ambient_temperature_system_failure` | 0.604 | 0.734 | **0.786** |
-| `cpu_utilization_asg_misconfiguration` | 0.749 | 0.849 | **0.906** |
-| `ec2_request_latency_system_failure` | **0.525** | 0.481 | 0.482 |
-| `machine_temperature_system_failure` | 0.584 | 0.880 | **0.883** |
-| `nyc_taxi` | **0.588** | 0.571 | 0.540 |
-| `rogue_agent_key_hold` | 0.379 | 0.535 | **0.633** |
-| `rogue_agent_key_updown` | **0.544** | 0.657 | 0.542 |
+| File | rcf-rs `score()` | rcf-rs `score_codisp()` | rrcf | AWS Java |
+|---|---|---|---|---|
+| `ambient_temperature_system_failure` | 0.813 | **0.813** | 0.734 | 0.786 |
+| `cpu_utilization_asg_misconfiguration` | **0.953** | 0.939 | 0.849 | 0.906 |
+| `ec2_request_latency_system_failure` | 0.709 | **0.739** | 0.481 | 0.482 |
+| `machine_temperature_system_failure` | 0.578 | 0.666 | 0.880 | **0.883** |
+| `nyc_taxi` | 0.698 | **0.721** | 0.571 | 0.540 |
+| `rogue_agent_key_hold` | 0.145 | **0.692** | 0.535 | 0.633 |
+| `rogue_agent_key_updown` | 0.633 | **0.721** | 0.657 | 0.542 |
 
-`rrcf` and AWS Java both use probe-based scoring (insert probe
-then query displacement), which explains the ~13-point gap vs
-`rcf-rs`'s isolation-depth `score()`. The isolation-depth path
-is ~18× faster to score per point; the probe-based path is
-more accurate on context-sensitive anomalies. Both are valid
-RCF scoring conventions.
+rcf-rs ships two scoring APIs: the fast `score()` path
+(isolation depth, rayon-parallel, non-mutating — eBPF-hot-path
+friendly) and the heavier `score_codisp()` path (probe-based,
+mutating, sequential per tree — ~30× slower). rrcf + AWS Java
+use probe-based scoring by default; `score_codisp()` matches
+their semantic and leads the aggregate.
 
-The rcf-rs ignored test pins an aggregate-AUC floor of `0.60`
+The rcf-rs ignored test pins an aggregate-AUC floor of `0.70`
 as a regression guard.
