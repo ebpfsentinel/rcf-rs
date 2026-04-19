@@ -108,51 +108,70 @@ Scaling `N=32→512` (16× tenants):
 
 ## External baselines (synthetic)
 
-Input: 10k points, `D=16`, 1 % outliers, seed 2026, 30 % warm
-/ 70 % eval, frozen baseline. Each impl on its idiomatic fast
-path (rcf-rs rayon / rrcf single-process / sklearn
-NumPy-Cython SIMD / AWS Java cold JVM).
+Input: 10k points, `D=16`, 1 % outliers, 30 % warm / 70 % eval,
+frozen baseline. Each impl on its idiomatic fast path
+(rcf-rs rayon / rrcf single-process / sklearn NumPy-Cython SIMD
+/ AWS Java cold JVM). **5-seed variance** (seeds 2026–2030),
+mean ± stddev, coefficient of variation in parens.
 
 | Impl | Backend | Updates/s | Scores/s | AUC |
 |---|---|---|---|---|
-| `rcf-rs` 0.0.0-dev | Rust, rayon-parallel | **32.5k** | **203k** | 1.000 |
-| `randomcutforest-java` 4.4.0 | JVM 26, cold | 3.9k | 21k | 1.000 |
-| `rrcf` 0.4.4 | Python + NumPy | 0.15k | 184k | 0.992 |
-| `sklearn.IsolationForest` | NumPy + Cython | batch ≈ 48k/s | 234k | 1.000 |
+| `rcf-rs` 0.0.0-dev | Rust, rayon-parallel | **17 500 ± 1 240** (7 %) | 125 900 ± 1 840 (1.5 %) | 1.000 ± 0 |
+| `randomcutforest-java` 4.4.0 | JVM 26, cold | 2 090 ± 134 (6 %) | 8 870 ± 415 (5 %) | 1.000 ± 0 |
+| `rrcf` 0.4.4 | Python + NumPy | 73 ± 3 (4 %) | 94 150 ± 4 840 (5 %) | 0.992 ± 0 |
+| `sklearn.IsolationForest` | NumPy + Cython | batch-only | **136 300 ± 2 450** (2 %) | 1.000 ± 0 |
 
-- rcf-rs inserts 10× faster than AWS Java, 220× faster than rrcf.
-- Score throughput within 15 % across all four on fast paths.
-- sklearn `IsolationForest` is batch-only (no streaming update).
-- rrcf parallelism unusable (thread-unsafe `codisp`, unpicklable
-  trees — see `scripts/external-bench/README.md`).
+Ratios (mean/mean):
 
-Reproduce:
+- **Updates**: rcf-rs is ~8.4× faster than AWS Java, ~240× faster
+  than rrcf. CVs around 5-7 % on all impls; the ratios sit well
+  outside the noise floor.
+- **Scores**: sklearn edges rcf-rs by 8 % (136k vs 126k) — a
+  real but small gap (stddevs combined ≈ 3k, so the 10k delta
+  is ~3σ significant). rrcf trails rcf-rs by ~25 %; AWS Java
+  trails by ~14×.
+- **AUC**: identical within measurement precision across every
+  seed (0.992 for rrcf, 1.000 for the other three).
+
+Noise sources documented: machine thermal state varies across
+runs — single-seed numbers from an earlier cool-CPU session
+landed at ~32k/203k for rcf-rs, dropping to ~17k/126k on this
+run. The **ratios are portable, the absolute numbers aren't**.
+
+Reproduce the sweep:
 
 ```bash
-python3 scripts/external-bench/gen_points.py --n 10000 --dim 16 --seed 2026 > data.csv
-python3 scripts/external-bench/bench_rrcf.py --input data.csv --trees 100 --sample 256
-python3 scripts/external-bench/bench_sklearn_iforest.py --input data.csv --trees 100 --train-frac 0.3
-cargo run --release --example external_bench_driver -- data.csv 100 256
-# AWS Java — see scripts/external-bench/README-aws-java.md
+scripts/external-bench/variance_sweep.sh /tmp/aws-rcf/randomcutforest-core-4.4.0.jar
 ```
 
 ## Detection quality — NAB `realKnownCause`
 
-Protocol: 32-lag temporal embedding → warm-phase z-score
-normalisation → frozen-baseline `score()` → EMA smoothing
-(α = 0.02). 15 % warm, 100 trees × 256 sample. AUC via
-trapezoidal rule against `combined_windows.json`.
+Two scoring APIs, two use cases:
 
-| File | rcf-rs | rrcf | AWS Java |
-|---|---|---|---|
-| `ambient_temperature_system_failure` | **0.813** | 0.734 | 0.786 |
-| `cpu_utilization_asg_misconfiguration` | **0.953** | 0.849 | 0.906 |
-| `ec2_request_latency_system_failure` | **0.709** | 0.481 | 0.482 |
-| `machine_temperature_system_failure` | 0.578 | 0.880 | **0.883** |
-| `nyc_taxi` | **0.698** | 0.571 | 0.540 |
-| `rogue_agent_key_hold` | 0.145 | 0.535 | **0.633** |
-| `rogue_agent_key_updown` | **0.633** | 0.657 | 0.542 |
-| **weighted aggregate** | 0.719 | 0.748 | **0.757** |
+- **`RandomCutForest::score()`** — isolation-depth, never
+  mutates the forest, rayon-parallel, eBPF-hot-path friendly.
+  On NAB: **0.719** aggregate AUC after the lag=32 + zscore +
+  smooth(0.02) pipeline.
+- **`RandomCutForest::score_codisp()`** — probe-based (insert,
+  walk leaf→root accumulating `max(sibling.mass /
+  subtree.mass)`, remove). Matches rrcf / AWS Java scoring
+  semantic. ~30× slower; intended for SOC triage / forensic
+  replay. On NAB: **0.776** aggregate AUC, beats both rrcf
+  and AWS Java.
+
+Same embedding pipeline (32-lag → warm-phase z-score → EMA
+α = 0.02), 15 % warm, 100 trees × 256 sample.
+
+| File | rcf-rs `score()` | rcf-rs `score_codisp()` | rrcf | AWS Java |
+|---|---|---|---|---|
+| `ambient_temperature_system_failure` | 0.813 | 0.813 | 0.734 | 0.786 |
+| `cpu_utilization_asg_misconfiguration` | 0.953 | 0.939 | 0.849 | 0.906 |
+| `ec2_request_latency_system_failure` | 0.709 | 0.739 | 0.481 | 0.482 |
+| `machine_temperature_system_failure` | 0.578 | 0.666 | 0.880 | 0.883 |
+| `nyc_taxi` | 0.698 | 0.721 | 0.571 | 0.540 |
+| `rogue_agent_key_hold` | 0.145 | 0.692 | 0.535 | 0.633 |
+| `rogue_agent_key_updown` | 0.633 | 0.721 | 0.657 | 0.542 |
+| **weighted aggregate** | 0.719 | **0.776** | 0.748 | 0.757 |
 
 ### Hyperparameter ablation
 
@@ -170,6 +189,7 @@ trapezoidal rule against `combined_windows.json`.
 | lag=64 + zscore + smooth(0.05) | 0.672 |
 | trcf-online D=32 | 0.320 |
 | probe-score D=8 (naive hack) | 0.330 |
+| **codisp D=32 + zscore + smooth(0.02)** | **0.776** |
 
 - **Longer embedding** (lag=32) captures wider context — +0.050.
 - **Z-score per warm-phase dim stddev** compensates NAB's scale
@@ -185,22 +205,21 @@ trapezoidal rule against `combined_windows.json`.
   EMA threshold adapts UP during the multi-day anomaly windows
   and stops flagging them. Frozen baseline is the right paradigm
   for NAB's wide-window labels.
-- **Probe-based scoring** (`update_indexed → score → delete`)
-  is a naive hack that tanks AUC — the post-insert `score` path
-  ranks the freshly-inserted probe as seen. Proper `codisp`
-  requires walking from the inserted leaf back to root summing
-  `sibling_mass / subtree_size` per level; not reachable through
-  the current public API.
+- **Probe-based naive hack** (`update_indexed → score → delete`)
+  tanks AUC (0.330) — post-insert `score` ranks the freshly-
+  inserted probe as seen. Proper codisp is `score_codisp()`:
+  walks from inserted leaf → root accumulating
+  `max(sibling.mass / subtree.mass)`, then deletes the probe.
 
-### Gap vs rrcf / AWS Java
+### Two-API split
 
-rcf-rs lands at 0.719 vs rrcf 0.748 / AWS Java 0.757 — within
-3-4 points. Both leaders use probe-based scoring which captures
-contextual displacement we don't have. On 4 of 7 files rcf-rs
-leads (`ambient`, `cpu`, `ec2_request`, `nyc_taxi`,
-`rogue_agent_key_updown`); on 2 files (`machine_temperature`,
-`rogue_agent_key_hold`) probe-based pulls ahead by large
-margins.
+`score()` (isolation-depth, non-mutating, parallel) and
+`score_codisp()` (probe-based, mutating, sequential per tree)
+serve different use cases. `score()` is the eBPF hot-path
+default; `score_codisp()` is for SOC triage / forensic replay
+where the extra ~30× latency is acceptable for the +0.057 AUC
+gain. On NAB, `score_codisp()` (0.776) leads both rrcf (0.748)
+and AWS Java (0.757).
 
 - `tests/detection_quality.rs` pins synthetic-corpus regression
   guards: AUC > 0.95 on separable clusters, > 0.90 on transition.

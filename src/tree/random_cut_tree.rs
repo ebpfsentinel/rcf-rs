@@ -194,6 +194,17 @@ impl<const D: usize> RandomCutTree<D> {
         self.leaf_index_contains(point_idx)
     }
 
+    /// `NodeRef` of the leaf currently mapped to `point_idx`, or
+    /// `None` when the reservoir has evicted it (or never admitted
+    /// it). Exposed so forest-level scoring paths that need to walk
+    /// the leaf's ancestor chain (e.g. `codisp`-style probe scoring)
+    /// can locate the leaf without re-traversing from the root.
+    #[must_use]
+    #[inline]
+    pub fn leaf_of(&self, point_idx: usize) -> Option<NodeRef> {
+        self.leaf_index_get(point_idx)
+    }
+
     /// Maximum depth from the root to any leaf, or `None` when the
     /// tree is empty. Used by tests and diagnostics to verify the
     /// expected `O(log n)` depth bound under uniform-random inserts.

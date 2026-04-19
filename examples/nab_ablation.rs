@@ -33,6 +33,10 @@ enum Mode {
     ForestFrozen,
     /// Bare RCF, probe-based hack (`update_indexed → score → delete`).
     ForestProbe,
+    /// Bare RCF, proper codisp via `score_codisp` — insert leaf,
+    /// walk ancestors summing `max(sibling.mass / subtree.mass)`,
+    /// remove leaf. The rrcf / AWS-Java scoring semantic.
+    ForestCodisp,
     /// TRCF with online updates — EMA-adaptive threshold evolves
     /// with the stream, `time_decay > 0` lets the baseline age out.
     /// `score_only` is called first (frozen view) and then the
@@ -187,6 +191,25 @@ fn main() {
         ),
         // probe variants kept for reference
         mk("probe-score D=8", 8, Mode::ForestProbe, false, false, 0.0),
+        // proper codisp (probe-based, walk leaf→root)
+        mk("codisp D=8", 8, Mode::ForestCodisp, false, false, 0.0),
+        mk("codisp D=32", 32, Mode::ForestCodisp, false, false, 0.0),
+        mk(
+            "codisp D=32 + zscore",
+            32,
+            Mode::ForestCodisp,
+            false,
+            true,
+            0.0,
+        ),
+        mk(
+            "codisp D=32 + zscore + smooth(0.02)",
+            32,
+            Mode::ForestCodisp,
+            false,
+            true,
+            0.02,
+        ),
     ];
 
     let windows = load_windows(&root.join("labels/combined_windows.json"));
@@ -305,7 +328,7 @@ fn run<const D: usize>(
     let mut labels = Vec::with_capacity(embed_len.saturating_sub(warm_end));
 
     match cfg.mode {
-        Mode::ForestFrozen | Mode::ForestProbe => {
+        Mode::ForestFrozen | Mode::ForestProbe | Mode::ForestCodisp => {
             let mut forest = ForestBuilder::<D>::new()
                 .num_trees(cfg.trees)
                 .sample_size(cfg.sample)
@@ -317,8 +340,11 @@ fn run<const D: usize>(
                 forest.update(*p).ok();
             }
             for (i, p) in embeddings[warm_end..].iter().enumerate() {
-                let s = if matches!(cfg.mode, Mode::ForestProbe) {
-                    match forest.update_indexed(*p) {
+                let s = match cfg.mode {
+                    Mode::ForestCodisp => forest
+                        .score_codisp(p)
+                        .unwrap_or_else(|_| AnomalyScore::new(0.0).unwrap()),
+                    Mode::ForestProbe => match forest.update_indexed(*p) {
                         Ok(idx) => {
                             let s = forest
                                 .score(p)
@@ -327,11 +353,10 @@ fn run<const D: usize>(
                             s
                         }
                         Err(_) => AnomalyScore::new(0.0).unwrap(),
-                    }
-                } else {
-                    forest
+                    },
+                    _ => forest
                         .score(p)
-                        .unwrap_or_else(|_| AnomalyScore::new(0.0).unwrap())
+                        .unwrap_or_else(|_| AnomalyScore::new(0.0).unwrap()),
                 };
                 raw_scores.push(f64::from(s));
                 let row_idx = warm_end + i + ts_offset;
