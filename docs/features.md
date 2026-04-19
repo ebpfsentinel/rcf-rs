@@ -83,6 +83,21 @@ absent-tenant returns `None` on read paths).
 
 Example: `examples/bulk_scoring.rs`.
 
+### Score with confidence interval
+
+`RandomCutForest::score_with_confidence(&point)` returns a
+`ScoreWithConfidence` packaging the mean score plus per-tree
+dispersion (`stddev`, `stderr`, `trees_evaluated`). SOC threshold
+tuning benefits from knowing how tightly the ensemble agrees: a
+`2.1 ± 0.05` verdict is qualitatively different from `2.1 ± 0.8`.
+Call `ci95()` for the 95 % Gaussian CI, `ci(z)` for any custom
+factor (99 % → `2.576`, 90 % → `1.645`). Always walks every tree;
+use `score_early_term` when tail latency matters instead.
+
+Types: `ScoreWithConfidence`, `DEFAULT_CI_Z_FACTOR` (`1.96`).
+
+Source: `src/score_ci.rs`.
+
 ### Early-termination scoring
 
 `score_early_term(&point, config)` walks trees sequentially and

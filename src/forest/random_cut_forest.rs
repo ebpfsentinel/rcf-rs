@@ -710,6 +710,71 @@ impl<const D: usize> RandomCutForest<D> {
         Ok(score)
     }
 
+    /// Score `point` and attach a confidence interval derived from
+    /// per-tree dispersion. Returns a [`ScoreWithConfidence`] with
+    /// `score` (mean), `stddev` (unbiased sample), `stderr`
+    /// (`stddev / sqrt(n)`), and `trees_evaluated` so callers can
+    /// build arbitrary-level CIs via
+    /// [`ScoreWithConfidence::ci`] / [`ScoreWithConfidence::ci95`].
+    ///
+    /// Always walks every tree (no early-term) — use this path when
+    /// SOC tuning needs the dispersion estimate on the full
+    /// ensemble. [`Self::score_early_term`] reports a similar
+    /// `stderr` for latency-bounded paths.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`score`](Self::score).
+    pub fn score_with_confidence(
+        &self,
+        point: &[f64; D],
+    ) -> RcfResult<crate::score_ci::ScoreWithConfidence> {
+        self.ensure_finite_metered(point)?;
+        let scaled = self.scale_point_copy(point);
+        let probe: &[f64; D] = &scaled;
+
+        // Collect per-tree scores into a small Vec (≤ num_trees f64s).
+        let mut samples: Vec<f64> = Vec::with_capacity(self.trees.len());
+        for (tree, _, _) in &self.trees {
+            let Some(root) = tree.root() else {
+                continue;
+            };
+            let mass = tree.store().node(root)?.mass();
+            let visitor = ScalarScoreVisitor::new(mass);
+            let s = tree.traverse(probe, visitor)?;
+            samples.push(f64::from(s));
+        }
+        if samples.is_empty() {
+            return Err(RcfError::EmptyForest);
+        }
+
+        let n = samples.len();
+        #[allow(clippy::cast_precision_loss)]
+        let n_f = n as f64;
+        let mean = samples.iter().sum::<f64>() / n_f;
+        let variance = if n > 1 {
+            let sq: f64 = samples.iter().map(|x| (x - mean).powi(2)).sum();
+            #[allow(clippy::cast_precision_loss)]
+            {
+                sq / (n - 1) as f64
+            }
+        } else {
+            0.0
+        };
+        let stddev = variance.sqrt();
+        let stderr = stddev / n_f.sqrt();
+        let score = AnomalyScore::new(mean.max(0.0))?;
+        #[cfg(feature = "std")]
+        self.metrics
+            .observe_histogram(crate::metrics::names::SCORE_OBSERVATION, f64::from(score));
+        Ok(crate::score_ci::ScoreWithConfidence {
+            score,
+            trees_evaluated: n,
+            stddev,
+            stderr,
+        })
+    }
+
     /// Compute the per-feature attribution of `point`'s anomaly
     /// score. Returns the mean [`DiVector`] across all trees that
     /// hold leaves.
@@ -1278,6 +1343,47 @@ mod tests {
         let score: f64 = f.score(&[0.5, 0.5]).unwrap().into();
         assert!(score >= 0.0);
         assert!(score.is_finite());
+    }
+
+    #[test]
+    fn score_with_confidence_matches_score_mean() {
+        let mut f = small_forest();
+        for i in 0..200 {
+            #[allow(clippy::cast_precision_loss)]
+            let v = i as f64 * 0.01;
+            f.update([v, v + 0.5]).unwrap();
+        }
+        let probe = [0.5, 0.5];
+        let plain: f64 = f.score(&probe).unwrap().into();
+        let ci = f.score_with_confidence(&probe).unwrap();
+        assert_eq!(f64::from(ci.score), plain);
+        assert!(ci.trees_evaluated > 0);
+        assert!(ci.stderr >= 0.0);
+        assert!(ci.stddev >= 0.0);
+        let (lo, hi) = ci.ci95();
+        assert!(lo <= plain);
+        assert!(hi >= plain);
+    }
+
+    #[test]
+    fn score_with_confidence_rejects_empty_forest() {
+        let f = small_forest();
+        assert!(matches!(
+            f.score_with_confidence(&[0.0, 0.0]).unwrap_err(),
+            RcfError::EmptyForest
+        ));
+    }
+
+    #[test]
+    fn score_with_confidence_rejects_nan_input() {
+        let mut f = small_forest();
+        for _ in 0..10 {
+            f.update([0.1, 0.2]).unwrap();
+        }
+        assert!(matches!(
+            f.score_with_confidence(&[f64::NAN, 0.0]).unwrap_err(),
+            RcfError::NaNValue
+        ));
     }
 
     #[test]
