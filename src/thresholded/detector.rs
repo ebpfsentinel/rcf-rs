@@ -297,6 +297,19 @@ impl<const D: usize> ThresholdedForest<D> {
         self.forest.attribution_many(points)
     }
 
+    /// Imputation-like forensic baseline. Delegates to
+    /// [`RandomCutForest::forensic_baseline`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`RandomCutForest::forensic_baseline`].
+    pub fn forensic_baseline(
+        &self,
+        point: &[f64; D],
+    ) -> RcfResult<crate::forensic::ForensicBaseline<D>> {
+        self.forest.forensic_baseline(point)
+    }
+
     /// Bulk early-termination scoring. Delegates to
     /// [`RandomCutForest::score_many_early_term`] — the threshold
     /// layer does not alter the scoring path.

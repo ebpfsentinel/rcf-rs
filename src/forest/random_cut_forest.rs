@@ -812,6 +812,100 @@ impl<const D: usize> RandomCutForest<D> {
             points.iter().map(|p| self.attribution(p)).collect()
         }
     }
+
+    /// Compute an imputation-like forensic baseline for `point`:
+    /// per-dim mean / stddev / delta / z-score against every
+    /// sample currently held in any tree's reservoir. Returns the
+    /// caller-facing result in *raw* point space — the internal
+    /// `feature_scales` transform is inverted so SOC dashboards see
+    /// the same coordinates they passed in.
+    ///
+    /// # Errors
+    ///
+    /// - [`RcfError::NaNValue`] when `point` contains a non-finite
+    ///   component.
+    /// - [`RcfError::EmptyForest`] when no tree currently holds a
+    ///   live point.
+    pub fn forensic_baseline(
+        &self,
+        point: &[f64; D],
+    ) -> RcfResult<crate::forensic::ForensicBaseline<D>> {
+        ensure_finite(point)?;
+
+        // Union of live indices across every reservoir.
+        let mut seen: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+        for (_, sampler, _) in &self.trees {
+            for idx in sampler.iter_indices() {
+                seen.insert(idx);
+            }
+        }
+        if seen.is_empty() {
+            return Err(RcfError::EmptyForest);
+        }
+
+        // Welford aggregate in *scaled* space (stored points are
+        // already scaled).
+        let mut n = 0_usize;
+        let mut mean_scaled = [0.0_f64; D];
+        let mut m2 = [0.0_f64; D];
+        for idx in &seen {
+            let Some(p_scaled) = self.point_store.point(*idx) else {
+                continue;
+            };
+            n = n.saturating_add(1);
+            #[allow(clippy::cast_precision_loss)]
+            let n_f = n as f64;
+            for d in 0..D {
+                let delta = p_scaled[d] - mean_scaled[d];
+                mean_scaled[d] += delta / n_f;
+                let delta2 = p_scaled[d] - mean_scaled[d];
+                m2[d] += delta * delta2;
+            }
+        }
+        if n == 0 {
+            return Err(RcfError::EmptyForest);
+        }
+
+        // Unscale mean / stddev back to raw coordinates.
+        let scales: Option<&Vec<f64>> = self.config.feature_scales.as_ref();
+        let mut expected = [0.0_f64; D];
+        let mut stddev = [0.0_f64; D];
+        for d in 0..D {
+            let scale_d = scales
+                .and_then(|v| v.get(d).copied())
+                .filter(|s| s.abs() > f64::EPSILON)
+                .unwrap_or(1.0);
+            expected[d] = mean_scaled[d] / scale_d;
+            #[allow(clippy::cast_precision_loss)]
+            let variance_scaled = if n >= 2 {
+                m2[d] / (n - 1) as f64
+            } else {
+                0.0
+            };
+            stddev[d] = variance_scaled.sqrt() / scale_d.abs();
+        }
+
+        let observed = *point;
+        let mut delta_arr = [0.0_f64; D];
+        let mut zscore = [0.0_f64; D];
+        for d in 0..D {
+            delta_arr[d] = observed[d] - expected[d];
+            zscore[d] = if stddev[d] > 0.0 {
+                delta_arr[d] / stddev[d]
+            } else {
+                0.0
+            };
+        }
+        Ok(crate::forensic::ForensicBaseline {
+            observed,
+            expected,
+            stddev,
+            delta: delta_arr,
+            zscore,
+            live_points: n,
+        })
+    }
 }
 
 /// Per-tree insert work — returns the list of evicted point indices

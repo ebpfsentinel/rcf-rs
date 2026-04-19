@@ -317,6 +317,24 @@ where
             .score_many_early_term(points, config)
     }
 
+    /// Per-tenant imputation-like forensic baseline. Returns `None`
+    /// when the tenant is absent — does not auto-create (forensic
+    /// is a read path).
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`ThresholdedForest::forensic_baseline`] errors.
+    pub fn forensic_baseline(
+        &mut self,
+        key: &K,
+        point: &[f64; D],
+    ) -> RcfResult<Option<crate::forensic::ForensicBaseline<D>>> {
+        match self.get_mut(key) {
+            Some(detector) => Ok(Some(detector.forensic_baseline(point)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Bulk per-feature attribution on a tenant's detector.
     /// Auto-creates the tenant.
     ///

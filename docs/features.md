@@ -113,6 +113,19 @@ reports how many trees were actually walked.
 
 Example: `examples/early_term.rs`.
 
+## Imputation-like forensic baseline
+
+`forensic_baseline(&point)` answers *"what would this dim have
+looked like if the point were normal?"*. Returns
+`ForensicBaseline<D>` with per-dim `expected` / `stddev` /
+`delta` / `zscore` against every live sample in the forest's
+reservoirs, plus `argmax_abs_zscore()` picking the most-anomalous
+dim. Baseline is returned in raw caller coordinates — the internal
+`feature_scales` transform is inverted. Great for SOC triage:
+alert table can display *observed* vs *normal expected* per dim.
+
+Example: `examples/forensic.rs`.
+
 ## Calibrated probability
 
 `PlattCalibrator::fit(&[(score, label)])` fits a 1-D sigmoid
