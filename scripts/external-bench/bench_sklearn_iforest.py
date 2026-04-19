@@ -74,6 +74,12 @@ def main() -> int:
     split = int(n * args.train_frac)
     print(f"points={n} dim={d} trees={args.trees} train={split}")
 
+    # sklearn's IsolationForest is NumPy/Cython-backed; the hot
+    # loop auto-vectorises via BLAS SIMD. `n_jobs=-1` actually
+    # regresses at this batch size (joblib task-spawn overhead
+    # exceeds the win on 100 trees x 10k points) — keep the
+    # default single-threaded config which measures the real
+    # cost of the vectorised path.
     model = IsolationForest(n_estimators=args.trees, random_state=2026)
     t0 = time.perf_counter_ns()
     model.fit(X[:split])

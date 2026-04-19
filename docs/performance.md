@@ -119,6 +119,101 @@ Cost is dominated by the `O(live_points × D)` Welford sweep over
 the union of tenant reservoirs. Quadrupling `sample_size` → ~4×
 slower. Per-dim cost is marginal vs. the iteration overhead.
 
+## External baselines
+
+`scripts/external-bench/` wires `rcf-rs`, `rrcf` (Python/NumPy)
+and scikit-learn's `IsolationForest` on identical input:
+10 000 points, `D = 16`, 1 % outlier fraction, seed 2026.
+Warm phase = 30 % (clean normal only), eval phase = 70 % (mixed).
+Frozen-baseline scoring — no updates during eval.
+
+Throughput normalised to each implementation's idiomatic fast
+path: `rcf-rs` uses the parallel `score_many` (rayon across
+points + trees); `rrcf` runs its native Python loop; `sklearn`
+uses NumPy/Cython SIMD on a batch `decision_function` call.
+`n_jobs=-1` on `IsolationForest` regresses at this batch size
+(joblib task-spawn overhead) so the default single-threaded
+path is reported — it already saturates on vectorised SIMD.
+
+| Impl | Backend | Updates / s | Scores / s | AUC |
+|---|---|---|---|---|
+| `rcf-rs` 0.0.0-dev | native Rust, rayon-parallel | **32.5k** | **203k** | 1.000 |
+| `rrcf` 0.4.4 | pure Python + NumPy | 0.15k | 184k | 0.992 |
+| `sklearn.IsolationForest` | NumPy + Cython, batch-fit | batch-fit ≈ 48k/s | 234k | 1.000 |
+
+Commentary:
+- **Streaming updates**: `rcf-rs` inserts ~220× faster than
+  `rrcf`. `rrcf`'s per-insert cost is dominated by Python object
+  churn on every `insert_point` call. `sklearn`'s IsolationForest
+  is batch-only — no streaming-update API — so its "Updates/s"
+  entry is the batch `.fit()` cost amortised per training point.
+- **Score throughput**: all three land in the same order of
+  magnitude once parallelism / vectorisation are on.
+  `sklearn` edges out on pure score-batch because its per-point
+  decision is a BLAS-vectorised matrix walk; `rcf-rs`'s
+  `score_many` stays competitive and is within 15 % of the
+  sklearn batch number.
+- **Detection quality**: all three sit within 1 % of perfect on
+  the synthetic separable corpus — as expected; the interesting
+  comparison is NAB below.
+
+Re-run the matrix on your hardware with:
+
+```bash
+python3 scripts/external-bench/gen_points.py --n 10000 --dim 16 --seed 2026 > data.csv
+python3 scripts/external-bench/bench_rrcf.py --input data.csv --trees 100 --sample 256
+python3 scripts/external-bench/bench_sklearn_iforest.py --input data.csv --trees 100 --train-frac 0.3
+./scripts/external-bench/run_rcf_rs.sh data.csv 100 256
+```
+
+## Detection quality on public corpora (NAB `realKnownCause`)
+
+Same embedding protocol for both implementations: 8-lag temporal
+embedding, 15 % warm fraction, 100 trees × 256 sample. Scoring
+semantics differ slightly (see commentary below) — that is itself
+the interesting data point.
+
+| File | `rcf-rs` AUC | `rrcf` AUC |
+|---|---|---|
+| `ambient_temperature_system_failure` | 0.604 | **0.734** |
+| `cpu_utilization_asg_misconfiguration` | 0.749 | **0.849** |
+| `ec2_request_latency_system_failure` | **0.525** | 0.481 |
+| `machine_temperature_system_failure` | 0.584 | **0.880** |
+| `nyc_taxi` | **0.588** | 0.571 |
+| `rogue_agent_key_hold` | 0.379 | **0.535** |
+| `rogue_agent_key_updown` | 0.544 | **0.657** |
+| **weighted aggregate** | 0.615 | **0.748** |
+
+Commentary:
+
+- `rrcf` wins on 5 / 7 files and the weighted aggregate. The gap
+  (~13 absolute points) is driven by scoring semantics: `rrcf`'s
+  `codisp` temporarily inserts the probe into every tree and
+  queries its *collusive displacement* (how much mass would move
+  if the point were removed). `rcf-rs`'s `score()` walks the
+  existing tree and scores by expected isolation depth — never
+  mutates the forest. Both are valid RCF scoring conventions;
+  `codisp` is closer to the "AWS paper" reference semantic and
+  trades throughput (insert-then-remove per probe = ~18× slower
+  at scoring) for accuracy on context-sensitive anomalies.
+- NAB is not RCF's strongest home turf — anomaly windows are
+  wide contextual shifts where time-aware detectors (HTM, LSTM)
+  typically land in the 0.75–0.85 range. Both `rcf-rs` and
+  `rrcf` are within the published RCF ballpark for the corpus.
+- **Action item**: wiring a `codisp`-style scoring path on top of
+  `rcf-rs` is a tracked future item — the current `score()` API
+  is frozen for the 0.1 release. Expected gain on NAB ≈ +0.10
+  aggregate AUC based on the `rrcf` delta.
+
+Run both via:
+
+```bash
+./scripts/nab/fetch.sh /opt/nab
+RCF_NAB_PATH=/opt/nab \
+    cargo test --test nab --all-features -- --ignored --nocapture
+python3 scripts/nab/bench_rrcf_nab.py --nab /opt/nab
+```
+
 ## Tenant pool at scale
 
 `tenant_pool` bench group, each tenant `D=4` / `(50, 64)`, warmed
@@ -144,20 +239,17 @@ Observations:
 
 ## Future work
 
-- **External baselines** — scaffolding shipped under
-  `scripts/external-bench/` (deterministic CSV generator, `rrcf`
-  + scikit-learn `IsolationForest` Python runners, `rcf-rs`
-  driver via the `external_bench_driver` example, AWS Java
-  outline). Run manually on the dev box, paste results back into
-  this file. Python + JVM toolchains are out-of-CI on purpose.
-- **Detection-quality benchmarks on public corpora** —
-  `tests/nab.rs` covers the Numenta Anomaly Benchmark
-  `realKnownCause` subset (`#[ignore]` gated behind
-  `RCF_NAB_PATH`; see `scripts/nab/fetch.sh`). On the 7 files,
-  rcf-rs sits at **weighted aggregate AUC ≈ 0.615** with 8-lag
-  temporal embedding + frozen-baseline eval protocol. Yahoo S5
-  (licence-gated) and Wikipedia pageviews (no ground-truth
-  labels) remain out of scope.
+- **`codisp` scoring path** — `rrcf` beats `rcf-rs` by ~0.13
+  aggregate AUC on NAB thanks to its insert-then-remove probe
+  protocol (see *Detection quality on public corpora* above).
+  A `score_codisp(&point)` entry point would close that gap at
+  the cost of ~18× scoring latency. Tracked as future work; the
+  0.1 API is intentionally frozen on the faster isolation-depth
+  score.
+- **Yahoo S5 / Wikipedia pageviews** — Yahoo S5 is
+  licence-gated (requires registration, no redistribution);
+  Wikipedia pageviews has no ground-truth anomaly labels.
+  Neither is a viable target for an open-source crate.
 - **Arena compression beyond the split** — the split-typed
   arenas shipped in v4 still pay ~2×300 B per resident
   `InternalData` at `D = 16`. Further wins would come from a

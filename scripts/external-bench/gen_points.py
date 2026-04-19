@@ -41,10 +41,11 @@ def main() -> int:
     data = np.vstack([normals, outliers])
     labels = np.concatenate([np.zeros(n_normal), np.ones(n_outliers)])
 
-    # Shuffle so the detector sees a realistic mixed stream.
-    order = rng.permutation(args.n)
-    data = data[order]
-    labels = labels[order]
+    # Two-phase layout: first `n_normal` rows are clean (suitable
+    # for warm-up), last `n_outliers` rows are the anomaly probes.
+    # Downstream drivers that want a shuffled stream can re-permute
+    # on their side, but the canonical layout is "train → eval"
+    # so the warm phase is guaranteed anomaly-free.
 
     writer = sys.stdout
     writer.write("label," + ",".join(f"d{i}" for i in range(args.dim)) + "\n")

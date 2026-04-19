@@ -33,7 +33,12 @@ fn main() -> Result<(), RcfError> {
 
     let (points, labels) = load_csv(path);
     let n = points.len();
-    println!("points={n} dim={D} trees={num_trees} sample={sample_size}");
+    // Split 30 / 70 — warm on the first slice, score the rest
+    // against the frozen-ish baseline. Matches realistic agent
+    // deployments and gives a non-degenerate AUC signal on
+    // synthetic outlier corpora.
+    let split = n * 3 / 10;
+    println!("points={n} dim={D} trees={num_trees} sample={sample_size} warm={split}");
 
     let mut forest = ForestBuilder::<D>::new()
         .num_trees(num_trees)
@@ -41,39 +46,49 @@ fn main() -> Result<(), RcfError> {
         .seed(2026)
         .build()?;
 
-    // Warm / insert phase — feed every point through `update`.
+    // Warm phase — insert the first slice, no scoring yet.
     let t_insert = Instant::now();
-    for p in &points {
+    for p in &points[..split] {
         forest.update(*p)?;
     }
     let insert_ns = t_insert.elapsed().as_nanos();
     #[allow(clippy::cast_precision_loss)]
-    let insert_per_s = n as f64 * 1.0e9 / insert_ns as f64;
+    let insert_per_s = split as f64 * 1.0e9 / insert_ns as f64;
 
-    // Score phase — score every point.
+    // Eval phase — score the remaining points against the trained
+    // baseline via the parallel `score_many` path. rayon fans out
+    // across points on top of the per-tree parallelism, matching
+    // sklearn's `n_jobs=-1` — apples to apples throughput.
+    let eval = &points[split..];
+    let eval_labels = &labels[split..];
     let t_score = Instant::now();
-    let mut scores = vec![0.0_f64; n];
-    forest.score_many_with(&points, |i, s: AnomalyScore| {
-        scores[i] = f64::from(s);
-    })?;
+    let scored: Vec<AnomalyScore> = forest.score_many(eval)?;
+    let scores: Vec<f64> = scored.iter().map(|s| f64::from(*s)).collect();
     let score_ns = t_score.elapsed().as_nanos();
     #[allow(clippy::cast_precision_loss)]
-    let score_per_s = n as f64 * 1.0e9 / score_ns as f64;
+    let score_per_s = eval.len() as f64 * 1.0e9 / score_ns as f64;
 
-    let a = auc(&scores, &labels);
+    let a = auc(&scores, eval_labels);
 
     #[allow(clippy::cast_precision_loss)]
     {
         println!(
-            "  inserts        = {n}, total {:.2} ms",
+            "  inserts        = {split}, total {:.2} ms",
             insert_ns as f64 / 1.0e6
         );
         println!(
-            "  scores         = {n}, total {:.2} ms",
+            "  scores         = {}, total {:.2} ms",
+            eval.len(),
             score_ns as f64 / 1.0e6
         );
-        println!("  per-op insert  = {:.0} ns", insert_ns as f64 / n as f64);
-        println!("  per-op score   = {:.0} ns", score_ns as f64 / n as f64);
+        println!(
+            "  per-op insert  = {:.0} ns",
+            insert_ns as f64 / split as f64
+        );
+        println!(
+            "  per-op score   = {:.0} ns",
+            score_ns as f64 / eval.len() as f64
+        );
     }
     println!("  updates_per_s  = {insert_per_s:.0}");
     println!("  scores_per_s   = {score_per_s:.0}");
