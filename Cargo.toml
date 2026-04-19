@@ -53,6 +53,10 @@ mimalloc = { version = "0.1", default-features = false }
 name = "warm_reload"
 required-features = ["postcard", "std"]
 
+[[example]]
+name = "nab_ablation"
+required-features = ["serde_json"]
+
 [[bench]]
 name = "forest_throughput"
 harness = false

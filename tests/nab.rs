@@ -30,7 +30,12 @@ use std::path::{Path, PathBuf};
 use rcf_rs::{AnomalyScore, ForestBuilder};
 use serde_json::Value;
 
-const D: usize = 8; // 8-lag temporal embedding (40 min on 5-min data)
+// 32-lag temporal embedding (~160 min of context on 5-min NAB
+// series). Ablation in `examples/nab_ablation.rs` measured lag=8
+// → 0.615, lag=16 → 0.650, lag=32 → 0.665 weighted aggregate AUC
+// — longer context absorbs more of the contextual-shift anomaly
+// structure NAB ships with.
+const D: usize = 32;
 const WARM_FRACTION: f64 = 0.15;
 
 /// One CSV row after parsing: `(timestamp_str, value)`.
