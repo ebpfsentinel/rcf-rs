@@ -317,6 +317,89 @@ where
             .score_many_early_term(points, config)
     }
 
+    /// Pairwise similarity between every tenant in the pool,
+    /// computed on each tenant's anomaly-score EMA stats
+    /// (`mean`, `stddev`). Tenants with fewer than
+    /// `min_observations` samples are skipped — their stats are
+    /// too noisy to compare.
+    ///
+    /// Similarity is `exp(-sqrt(Δmean² + Δstddev²))` ∈ `(0, 1]`:
+    /// identical distributions → `1.0`, unrelated → near `0`.
+    /// Returns `(key_a, key_b, similarity)` triples with
+    /// `key_a < key_b` ordering not guaranteed — callers that care
+    /// about a canonical order should sort their own slice.
+    #[must_use]
+    pub fn similarity_matrix(&self, min_observations: u64) -> Vec<(K, K, f64)> {
+        let tenants: Vec<(&K, &ThresholdedForest<D>)> = self
+            .forests
+            .iter()
+            .filter_map(|(k, slot)| {
+                if slot.forest.stats().observations() >= min_observations {
+                    Some((k, slot.forest.as_ref()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut out = Vec::with_capacity(tenants.len() * tenants.len() / 2);
+        for i in 0..tenants.len() {
+            for j in (i + 1)..tenants.len() {
+                let (k_a, f_a) = tenants[i];
+                let (k_b, f_b) = tenants[j];
+                let dm = f_a.stats().mean() - f_b.stats().mean();
+                let ds = f_a.stats().stddev() - f_b.stats().stddev();
+                let dist = (dm * dm + ds * ds).sqrt();
+                let sim = (-dist).exp();
+                out.push((k_a.clone(), k_b.clone(), sim));
+            }
+        }
+        out
+    }
+
+    /// Top-`n` tenants most similar to `key`, sorted by descending
+    /// similarity. Excludes `key` itself and tenants below
+    /// `min_observations`. Returns an empty vec when `key` is
+    /// absent or the pool is otherwise empty.
+    ///
+    /// See [`Self::similarity_matrix`] for the similarity metric.
+    #[must_use]
+    pub fn most_similar(
+        &self,
+        key: &K,
+        top_n: usize,
+        min_observations: u64,
+    ) -> Vec<(K, f64)> {
+        let Some(ref_slot) = self.forests.get(key) else {
+            return Vec::new();
+        };
+        let ref_stats = ref_slot.forest.stats();
+        if ref_stats.observations() < min_observations {
+            return Vec::new();
+        }
+        let mut pairs: Vec<(K, f64)> = self
+            .forests
+            .iter()
+            .filter_map(|(k, slot)| {
+                if k == key {
+                    return None;
+                }
+                let stats = slot.forest.stats();
+                if stats.observations() < min_observations {
+                    return None;
+                }
+                let dm = ref_stats.mean() - stats.mean();
+                let ds = ref_stats.stddev() - stats.stddev();
+                let dist = (dm * dm + ds * ds).sqrt();
+                Some((k.clone(), (-dist).exp()))
+            })
+            .collect();
+        pairs.sort_unstable_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(core::cmp::Ordering::Equal)
+        });
+        pairs.truncate(top_n);
+        pairs
+    }
+
     /// Per-tenant imputation-like forensic baseline. Returns `None`
     /// when the tenant is absent — does not auto-create (forensic
     /// is a read path).
@@ -743,6 +826,54 @@ mod tests {
         let mut ts = p.tenants();
         ts.sort_unstable();
         assert_eq!(ts, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn similarity_matrix_empty_pool_returns_empty() {
+        let p = TenantForestPool::<&'static str, 2>::new(4, factory_2d()).unwrap();
+        assert!(p.similarity_matrix(0).is_empty());
+    }
+
+    #[test]
+    fn similarity_matrix_skips_undertrained() {
+        let mut p = TenantForestPool::<&'static str, 2>::new(4, factory_2d()).unwrap();
+        // Tenant A: plenty of observations.
+        for i in 0_u32..64 {
+            let v = f64::from(i) * 0.01;
+            p.process(&"a", [v, v]).unwrap();
+        }
+        // Tenant B: very few observations — should be skipped with
+        // min_observations = 32.
+        for i in 0_u32..8 {
+            let v = f64::from(i) * 0.01;
+            p.process(&"b", [v, v]).unwrap();
+        }
+        let pairs = p.similarity_matrix(32);
+        assert!(pairs.is_empty(), "only A passed the min_obs threshold");
+    }
+
+    #[test]
+    fn most_similar_ranks_correctly() {
+        let mut p = TenantForestPool::<&'static str, 2>::new(8, factory_2d()).unwrap();
+        // Three tenants: A and C with similar baseline, B different.
+        for i in 0_u32..64 {
+            let v = f64::from(i) * 0.01;
+            p.process(&"a", [v, v]).unwrap();
+            p.process(&"c", [v, v]).unwrap();
+            p.process(&"b", [v + 10.0, v + 10.0]).unwrap();
+        }
+        let ranked = p.most_similar(&"a", 2, 1);
+        assert_eq!(ranked.len(), 2);
+        // c should rank above b (scores should be closer for same-baseline tenants).
+        let c_sim = ranked.iter().find(|(k, _)| *k == "c").unwrap().1;
+        let b_sim = ranked.iter().find(|(k, _)| *k == "b").unwrap().1;
+        assert!(c_sim >= b_sim, "c similarity {c_sim} should be >= b {b_sim}");
+    }
+
+    #[test]
+    fn most_similar_absent_key_returns_empty() {
+        let p = TenantForestPool::<&'static str, 2>::new(4, factory_2d()).unwrap();
+        assert!(p.most_similar(&"unknown", 3, 0).is_empty());
     }
 
     #[test]

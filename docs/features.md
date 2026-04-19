@@ -148,6 +148,19 @@ in-process bin + percentile export.
 
 Example: `examples/observability.rs`.
 
+## Tenant similarity index
+
+`TenantForestPool::similarity_matrix(min_obs)` /
+`most_similar(&key, top_n, min_obs)` return pairwise tenant
+similarity ∈ `(0, 1]` computed on each tenant's TRCF score-stream
+EMA (`mean`, `stddev`). Similarity = `exp(-sqrt(Δmean² + Δstddev²))`.
+Intended for SaaS deployments with thousands of tenants —
+identify clusters to apply tiered alerting or shared calibration,
+or spot a tenant whose baseline drifts away from its peer group.
+Tenants below `min_obs` samples are excluded (stats too noisy).
+
+Example: `examples/tenant_similarity.rs`.
+
 ## Cold-start warmup
 
 `initial_accept_fraction` ramps the reservoir admission probability
