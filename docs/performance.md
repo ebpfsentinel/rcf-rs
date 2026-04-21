@@ -153,18 +153,28 @@ scripts/synthetic/variance_sweep.sh /tmp/aws-rcf/randomcutforest-core-4.4.0.jar
 
 ## Detection quality — NAB `realKnownCause`
 
-Two scoring APIs, two use cases:
+Three scoring APIs, three trade-offs:
 
-- **`RandomCutForest::score()`** — isolation-depth, never
-  mutates the forest, rayon-parallel, eBPF-hot-path friendly.
+- **`RandomCutForest::score()`** — isolation-depth, non-mutating,
+  rayon-parallel, eBPF-hot-path friendly.
   On NAB: **0.719** aggregate AUC after the lag=32 + zscore +
   smooth(0.02) pipeline.
 - **`RandomCutForest::score_codisp()`** — probe-based (insert,
   walk leaf→root accumulating `max(sibling.mass /
   subtree.mass)`, remove). Matches rrcf / AWS Java scoring
-  semantic. ~30× slower; intended for SOC triage / forensic
-  replay. On NAB: **0.776** aggregate AUC, beats both rrcf
-  and AWS Java.
+  semantic. ~30× slower than `score()` and **mutates the
+  reservoir** — insertion evicts baseline points the following
+  `delete` cannot restore, so long eval streams drift away from
+  the frozen warm-phase baseline. On NAB: **0.776** aggregate
+  AUC, beats rrcf (0.748) and AWS Java (0.757).
+- **`RandomCutForest::score_codisp_stateless()`** — root → leaf
+  walk along stored cuts, accumulates `max(sibling_mass /
+  subtree_mass)` per level without inserting the probe. Preserves
+  the frozen-baseline promise exactly, takes `&self`, rayon-
+  parallel across trees. On NAB: **0.763** aggregate AUC
+  (**~0.013 shy of mutating codisp, ~0.044 above `score()`**).
+  Runtime for the 7-file corpus: **1.09 s parallel** — 12× faster
+  than the mutating variant.
 
 Same embedding pipeline (32-lag → warm-phase z-score → EMA
 α = 0.02), 15 % warm, 100 trees × 256 sample. `tests/nab.rs`
@@ -172,16 +182,16 @@ runs the 7-file corpus in parallel via rayon `par_iter` over
 files — each file owns an independent forest. Full run
 (both variants, parallel file iter) completes in ~12 s.
 
-| File | rcf-rs `score()` | rcf-rs `score_codisp()` | rrcf | AWS Java |
-|---|---|---|---|---|
-| `ambient_temperature_system_failure` | **0.813** | **0.813** | 0.734 | 0.786 |
-| `cpu_utilization_asg_misconfiguration` | 0.953 | **0.969** | 0.849 | 0.906 |
-| `ec2_request_latency_system_failure` | 0.709 | 0.706 | 0.481 | 0.482 |
-| `machine_temperature_system_failure` | 0.578 | 0.817 | 0.880 | **0.883** |
-| `nyc_taxi` | **0.698** | 0.636 | 0.571 | 0.540 |
-| `rogue_agent_key_hold` | 0.145 | 0.198 | 0.535 | **0.633** |
-| `rogue_agent_key_updown` | **0.633** | 0.579 | 0.657 | 0.542 |
-| **weighted aggregate** | 0.719 | **0.776** | 0.748 | 0.757 |
+| File | `score()` | `score_codisp()` | `score_codisp_stateless()` | rrcf | AWS Java |
+|---|---|---|---|---|---|
+| `ambient_temperature_system_failure` | **0.813** | **0.813** | 0.793 | 0.734 | 0.786 |
+| `cpu_utilization_asg_misconfiguration` | 0.953 | **0.969** | 0.963 | 0.849 | 0.906 |
+| `ec2_request_latency_system_failure` | **0.709** | 0.706 | 0.621 | 0.481 | 0.482 |
+| `machine_temperature_system_failure` | 0.578 | **0.817** | 0.815 | 0.880 | 0.883 |
+| `nyc_taxi` | **0.698** | 0.636 | 0.623 | 0.571 | 0.540 |
+| `rogue_agent_key_hold` | 0.145 | 0.198 | 0.181 | 0.535 | **0.633** |
+| `rogue_agent_key_updown` | **0.633** | 0.579 | 0.563 | 0.657 | 0.542 |
+| **weighted aggregate** | 0.719 | **0.776** | 0.763 | 0.748 | 0.757 |
 
 ### Hyperparameter ablation
 
@@ -255,7 +265,9 @@ whitelist `{2, 3, 7, 8, 9, 12, 16, 17, 18, 19, 25, 29, 31, 38, 51,
 55, 66}` covers **192 / 200 files (96 %)**; the eight D=248 files
 are skipped. `tests/tsb_ad_m.rs` runs the corpus in parallel via
 rayon `par_iter` over files. Runtime on reference hardware:
-~3 min for `score()`, ~6 min for `score_codisp()`.
+~3 min `score()`, ~6 min `score_codisp()` (stride-subsampled to
+50 k eval rows / file), ~3 min `score_codisp_stateless()` on the
+**full** eval stream.
 
 Per-dataset ROC-AUC (weighted by positive count) against
 `randomcutforest-java` 4.4.0 on the same corpus. rrcf 0.4.4 was
@@ -265,26 +277,26 @@ but wall-time is prohibitive on the full corpus — ~3–4 h at
 14 workers / `--max-eval 1500`. Numbers are left for the reader
 to reproduce; the script is provided for reproducibility.
 
-| Source dataset | Files | rcf-rs `score()` | rcf-rs `score_codisp()` | AWS Java `getAnomalyScore` |
-|---|---|---|---|---|
-| Genesis | 1 | 0.968 | **0.991** | 0.982 |
-| SMAP | 27 | 0.803 | **0.823** | 0.805 |
-| SMD | 22 | 0.618 | 0.760 | **0.806** |
-| MSL | 16 | 0.705 | 0.746 | **0.762** |
-| SVDB | 31 | 0.692 | 0.737 | **0.757** |
-| LTDB | 5 | 0.601 | **0.755** | **0.755** |
-| Exathlon | 27 | 0.491 | **0.894** | 0.865 |
-| MITDB | 13 | 0.597 | **0.678** | 0.660 |
-| PSM | 1 | 0.608 | 0.595 | **0.611** |
-| CATSv2 | 6 | **0.580** | 0.547 | 0.547 |
-| CreditCard | 1 | 0.589 | 0.679 | **0.693** |
-| Daphnet | 1 | 0.309 | 0.885 | **0.944** |
-| GECCO | 1 | 0.412 | 0.523 | **0.594** |
-| GHL | 25 | 0.454 | **0.461** | 0.419 |
-| OPPORTUNITY | 8 (skipped D=248) | — | — | 0.298 |
-| SWaT | 2 | 0.282 | 0.825 | 0.825 |
-| TAO | 13 | 0.451 | 0.453 | **0.471** |
-| **aggregate weighted** | **192 / 200** | **0.583** | **0.768** | **0.753** |
+| Source dataset | Files | `score()` | `score_codisp()` | `score_codisp_stateless()` | AWS Java |
+|---|---|---|---|---|---|
+| Genesis | 1 | 0.968 | **0.991** | **0.994** | 0.982 |
+| SMAP | 27 | 0.803 | **0.823** | 0.716 | 0.805 |
+| SMD | 22 | 0.618 | **0.760** | 0.752 | 0.806 |
+| MSL | 16 | **0.705** | 0.746 | 0.599 | 0.762 |
+| SVDB | 31 | 0.692 | 0.737 | **0.779** | 0.757 |
+| LTDB | 5 | 0.601 | 0.755 | **0.758** | 0.755 |
+| Exathlon | 27 | 0.491 | 0.894 | **0.996** | 0.865 |
+| MITDB | 13 | 0.597 | **0.678** | 0.603 | 0.660 |
+| PSM | 1 | 0.608 | 0.595 | 0.613 | **0.611** |
+| CATSv2 | 6 | **0.580** | 0.547 | 0.496 | 0.547 |
+| CreditCard | 1 | 0.589 | 0.679 | 0.658 | **0.693** |
+| Daphnet | 1 | 0.309 | 0.885 | **0.926** | 0.944 |
+| GECCO | 1 | 0.412 | 0.523 | **0.753** | 0.594 |
+| GHL | 25 | 0.454 | 0.461 | **0.570** | 0.419 |
+| OPPORTUNITY | 8 (skipped D=248) | — | — | — | 0.298 |
+| SWaT | 2 | 0.282 | **0.825** | 0.715 | 0.825 |
+| TAO | 13 | 0.451 | 0.453 | **0.487** | 0.471 |
+| **aggregate weighted** | **192 / 200** | **0.583** | **0.768** | **0.751** | **0.753** |
 
 - **rcf-rs `score()`** — isolation depth, rayon-parallel, full
   eval scan. Same fast API eBPFsentinel ships on the hot path.
@@ -292,13 +304,21 @@ to reproduce; the script is provided for reproducibility.
   the aggregate floor at 0.55 — regression guard, not a quality
   claim.
 - **rcf-rs `score_codisp()`** — probe-based codisp walk (leaf → root,
-  `max(sibling.mass / subtree.mass)`), sequential per tree.
-  Stride-subsampled to 50 000 eval rows per file (const
-  `CODISP_MAX_EVAL`). Rayon-parallel across files so a
-  14 C / 20 T host covers the 192-file corpus in ~5 min.
-  Directly comparable to the AWS Java / rrcf semantic; leads
-  aggregate **0.768** vs AWS Java 0.753.
+  `max(sibling.mass / subtree.mass)`), sequential per tree,
+  mutates the reservoir per probe. Stride-subsampled to 50 000
+  eval rows per file (const `CODISP_MAX_EVAL`). Directly
+  comparable to the AWS Java / rrcf semantic; leads aggregate
+  **0.768** vs AWS Java 0.753.
   `tests/tsb_ad_m.rs::tsb_ad_m_codisp_aggregate_auc_above_floor`.
+- **rcf-rs `score_codisp_stateless()`** — root → leaf walk along
+  stored cuts, max `sibling_mass / subtree_mass` per level, no
+  reservoir mutation. Takes `&self` → rayon-parallel across
+  trees. Covers the **full** eval stream (no stride) and
+  preserves the frozen-baseline semantic across long runs.
+  Aggregate **0.751** — ~0.017 below the drift-affected mutating
+  codisp but within measurement noise of AWS Java (0.753) and
+  the only variant that scales past the `CODISP_MAX_EVAL` cap.
+  `tests/tsb_ad_m.rs::tsb_ad_m_codisp_stateless_aggregate_auc_above_floor`.
 - **AWS Java `getAnomalyScore()`** — codisp-like, stride-
   subsampled to 50 000 eval rows per file (essentially full-scan
   for 95 % of the corpus). Covers all 200 files including the

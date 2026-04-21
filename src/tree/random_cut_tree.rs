@@ -629,6 +629,61 @@ impl<const D: usize> RandomCutTree<D> {
         }
     }
 
+    /// Non-mutating codisp estimate — walks root → leaf following
+    /// the stored cuts and accumulates the maximum per-depth ratio
+    /// `sibling_mass / subtree_mass` across the descent path.
+    ///
+    /// Matches the shape of the mutating [`crate::RandomCutForest::score_codisp`]
+    /// walk but **without** inserting the probe into the reservoir.
+    /// The classical `codisp` promises a frozen baseline (AWS /
+    /// rrcf); the mutating path's insert+delete cycle leaves
+    /// reservoir points evicted permanently, eroding that baseline
+    /// across long eval streams (observed on NAB `rogue_hold`:
+    /// score drifts from 0.69 to 0.20 after ~5 k probes).
+    ///
+    /// This path preserves the frozen-baseline promise exactly,
+    /// takes `&self` so it parallelises across trees, and costs
+    /// `O(depth · D)` per call — typically cheaper than the
+    /// mutating walk since there is no reservoir housekeeping.
+    ///
+    /// # Errors
+    ///
+    /// - [`RcfError::EmptyForest`] when the tree is empty.
+    /// - [`RcfError::DimensionMismatch`] when `point.len() != D`.
+    /// - [`RcfError::NaNValue`] when `point` contains a non-finite
+    ///   component.
+    pub fn codisp_stateless(&self, point: &[f64]) -> RcfResult<f64> {
+        ensure_dim(point, D)?;
+        ensure_finite(point)?;
+        let Some(root) = self.root else {
+            return Err(RcfError::EmptyForest);
+        };
+        let mut cur = root;
+        let mut max_disp = 0.0_f64;
+        loop {
+            match self.store.view(cur)? {
+                crate::tree::NodeView::Leaf(_) => return Ok(max_disp),
+                crate::tree::NodeView::Internal(i) => {
+                    let (next, sibling) = if i.cut.left_of(point) {
+                        (i.left, i.right)
+                    } else {
+                        (i.right, i.left)
+                    };
+                    let next_mass = self.store.view(next)?.mass();
+                    let sibling_mass = self.store.view(sibling)?.mass();
+                    if next_mass > 0 {
+                        #[allow(clippy::cast_precision_loss)]
+                        let disp = sibling_mass as f64 / next_mass as f64;
+                        if disp > max_disp {
+                            max_disp = disp;
+                        }
+                    }
+                    cur = next;
+                }
+            }
+        }
+    }
+
     /// Walk from the root to the leaf matching `point` along the
     /// stored cuts, dispatching callbacks to `visitor`. Returns the
     /// visitor's final output.

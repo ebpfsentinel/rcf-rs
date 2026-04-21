@@ -797,6 +797,57 @@ impl<const D: usize> RandomCutForest<D> {
         Ok(score)
     }
 
+    /// Stateless codisp score — descends every tree root → leaf
+    /// along `cut.left_of(point)`, accumulates the maximum per-depth
+    /// `sibling_mass / subtree_mass` ratio, and averages across the
+    /// ensemble.
+    ///
+    /// **Fix for the mutating codisp drift bug**: [`Self::score_codisp`]
+    /// inserts the probe into the reservoir, walks leaf → root,
+    /// deletes the probe. The `delete` cannot restore baseline
+    /// points the insert evicted, so over a long eval stream the
+    /// reservoir drifts away from the frozen warm-phase baseline.
+    /// Observed on NAB `rogue_hold`: same seed, same algorithm,
+    /// AUC drifts from 0.69 (fresh forest) to 0.20 after ~5 k probes.
+    ///
+    /// `score_codisp_stateless` takes `&self`, never touches the
+    /// reservoir, and parallelises across trees under `parallel` —
+    /// same cost profile as [`Self::score`] plus a handful of mass
+    /// lookups per depth. Matches the classical "frozen baseline"
+    /// semantic AWS Java / rrcf claim but don't enforce.
+    ///
+    /// # Errors
+    ///
+    /// - [`RcfError::NaNValue`] on non-finite input.
+    /// - [`RcfError::EmptyForest`] when no tree holds any leaf.
+    pub fn score_codisp_stateless(&self, point: &[f64; D]) -> RcfResult<AnomalyScore> {
+        self.ensure_finite_metered(point)?;
+        let scaled = self.scale_point_copy(point);
+        let point = &scaled;
+
+        #[cfg(feature = "parallel")]
+        let (total, count) = if let Some(p) = self.pool.as_deref() {
+            p.install(|| codisp_stateless_aggregate(&self.trees, point))?
+        } else {
+            codisp_stateless_aggregate(&self.trees, point)?
+        };
+
+        #[cfg(not(feature = "parallel"))]
+        let (total, count) = codisp_stateless_aggregate(&self.trees, point)?;
+
+        if count == 0 {
+            return Err(RcfError::EmptyForest);
+        }
+
+        #[allow(clippy::cast_precision_loss)]
+        let mean = total / count as f64;
+        let score = AnomalyScore::new(mean.max(0.0))?;
+        #[cfg(feature = "std")]
+        self.metrics
+            .observe_histogram(crate::metrics::names::SCORE_OBSERVATION, f64::from(score));
+        Ok(score)
+    }
+
     /// Batched probe-based codisp — amortises the per-probe
     /// insert / delete overhead by pre-inserting all `points` into
     /// every tree, walking leaf → root with a **shared-walk cache**
@@ -1454,6 +1505,57 @@ fn process_tree_update<const D: usize>(
     Ok(freed)
 }
 
+/// Stateless codisp aggregation across trees — each tree computes
+/// `codisp_stateless(point)` and the forest averages the per-tree
+/// results. Serial fold or rayon parallel fold/reduce depending on
+/// the `parallel` cargo feature.
+fn codisp_stateless_aggregate<const D: usize>(
+    trees: &[TreeSlot<D>],
+    point: &[f64; D],
+) -> RcfResult<(f64, usize)> {
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        trees
+            .par_iter()
+            .map(|(tree, _, _)| -> RcfResult<Option<f64>> {
+                if tree.root().is_none() {
+                    return Ok(None);
+                }
+                let c = tree.codisp_stateless(point)?;
+                Ok(Some(c))
+            })
+            .try_fold(
+                || (0.0_f64, 0_usize),
+                |(t, c), step| {
+                    let s = step?;
+                    Ok::<_, RcfError>(match s {
+                        Some(v) => (t + v, c + 1),
+                        None => (t, c),
+                    })
+                },
+            )
+            .try_reduce(
+                || (0.0_f64, 0_usize),
+                |(t1, c1), (t2, c2)| Ok((t1 + t2, c1 + c2)),
+            )
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut total = 0.0_f64;
+        let mut count = 0_usize;
+        for (tree, _, _) in trees {
+            if tree.root().is_none() {
+                continue;
+            }
+            total += tree.codisp_stateless(point)?;
+            count += 1;
+        }
+        Ok((total, count))
+    }
+}
+
 /// Cheap locality key used by
 /// [`RandomCutForest::score_many_locality_sorted`] — quantises the
 /// first `min(D, 8)` dimensions into 8-bit buckets and packs them
@@ -1926,6 +2028,64 @@ mod tests {
         }
         let out = f.score_many_locality_sorted(&[]).unwrap();
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn score_codisp_stateless_returns_non_negative_on_trained_forest() {
+        let mut f = small_forest();
+        for i in 0..200 {
+            #[allow(clippy::cast_precision_loss)]
+            let v = i as f64 * 0.01;
+            f.update([v, v + 0.5]).unwrap();
+        }
+        let s: f64 = f.score_codisp_stateless(&[5.0, -3.0]).unwrap().into();
+        assert!(s.is_finite());
+        assert!(s >= 0.0);
+    }
+
+    #[test]
+    fn score_codisp_stateless_rejects_empty_forest() {
+        let f = small_forest();
+        assert!(matches!(
+            f.score_codisp_stateless(&[0.0, 0.0]).unwrap_err(),
+            RcfError::EmptyForest
+        ));
+    }
+
+    #[test]
+    fn score_codisp_stateless_rejects_nan() {
+        let mut f = small_forest();
+        for _ in 0..50 {
+            f.update([0.1, 0.2]).unwrap();
+        }
+        assert!(matches!(
+            f.score_codisp_stateless(&[f64::NAN, 0.0]).unwrap_err(),
+            RcfError::NaNValue
+        ));
+    }
+
+    #[test]
+    fn score_codisp_stateless_does_not_drift_across_many_probes() {
+        // Repro of the mutating-codisp drift: `score_codisp` calls
+        // displace reservoir baseline points permanently. The
+        // stateless variant must return the exact same score
+        // whether called once or 5 000 times.
+        let mut f = small_forest();
+        for i in 0..200 {
+            #[allow(clippy::cast_precision_loss)]
+            let v = i as f64 * 0.01;
+            f.update([v, v + 0.5]).unwrap();
+        }
+        let probe = [5.0, -3.0];
+        let first: f64 = f.score_codisp_stateless(&probe).unwrap().into();
+        for _ in 0..5_000 {
+            let _ = f.score_codisp_stateless(&probe).unwrap();
+        }
+        let last: f64 = f.score_codisp_stateless(&probe).unwrap().into();
+        assert!(
+            (first - last).abs() < 1e-12,
+            "stateless codisp drifted: first={first} last={last}"
+        );
     }
 
     #[test]

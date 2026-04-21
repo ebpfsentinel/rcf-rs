@@ -158,10 +158,14 @@ enum Scorer {
     /// Fast isolation-depth `score()` — non-mutating, rayon-
     /// parallel, eBPF-hot-path friendly.
     IsolationDepth,
-    /// Probe-based batched codisp via `score_codisp_many` —
-    /// matches the AWS Java / rrcf scoring semantic at ~30× the
-    /// single-probe cost amortised by the shared-walk cache.
+    /// Probe-based codisp via `score_codisp` — AWS Java / rrcf
+    /// semantic, mutates the forest per probe (known drift on long
+    /// streams, see `score_codisp_stateless` for the fix).
     Codisp,
+    /// Stateless codisp via `score_codisp_stateless` — walks root
+    /// → leaf along stored cuts, no reservoir mutation, preserves
+    /// the frozen-baseline promise and parallelises across trees.
+    CodispStateless,
 }
 
 /// Score one NAB file: `D`-lag embedding → warm-phase z-score
@@ -246,6 +250,9 @@ fn score_file(
                 .unwrap_or_else(|_| AnomalyScore::new(0.0).expect("zero valid")),
             Scorer::Codisp => forest
                 .score_codisp(p)
+                .unwrap_or_else(|_| AnomalyScore::new(0.0).expect("zero valid")),
+            Scorer::CodispStateless => forest
+                .score_codisp_stateless(p)
                 .unwrap_or_else(|_| AnomalyScore::new(0.0).expect("zero valid")),
         };
         raw_scores.push(f64::from(s));
@@ -358,12 +365,22 @@ fn realknowncause_aggregate_auc_above_floor() {
 #[test]
 #[ignore = "requires RCF_NAB_PATH; codisp path is ~30× slower than score()"]
 fn realknowncause_codisp_aggregate_auc_above_floor() {
-    let weighted_auc = run_corpus(Scorer::Codisp, "score_codisp_many()");
+    let weighted_auc = run_corpus(Scorer::Codisp, "score_codisp()");
     // Codisp floor is independent: probe-based scoring hits a
     // higher AUC on NAB but the magnitude depends on the batched
     // shared-walk behaviour, so pin a conservative guard.
     assert!(
         weighted_auc > 0.70,
         "codisp aggregate weighted AUC = {weighted_auc:.3} below floor 0.70"
+    );
+}
+
+#[test]
+#[ignore = "requires RCF_NAB_PATH; stateless codisp is non-mutating and parallel"]
+fn realknowncause_codisp_stateless_aggregate_auc_above_floor() {
+    let weighted_auc = run_corpus(Scorer::CodispStateless, "score_codisp_stateless()");
+    assert!(
+        weighted_auc > 0.70,
+        "stateless codisp aggregate weighted AUC = {weighted_auc:.3} below floor 0.70"
     );
 }

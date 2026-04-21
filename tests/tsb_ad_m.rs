@@ -203,6 +203,9 @@ enum Scorer {
     /// AWS Java `getAnomalyScore()` / rrcf `codisp()` semantic.
     /// Stride-subsampled eval to `CODISP_MAX_EVAL` rows.
     Codisp,
+    /// Stateless codisp — no reservoir mutation, preserves
+    /// frozen-baseline semantic across the full eval stream.
+    CodispStateless,
 }
 
 /// Core per-file scoring pipeline, specialised on `D`. Reads the
@@ -269,10 +272,11 @@ fn score_file<const D: usize>(
         let _ = forest.update(p);
     }
 
-    // Build eval index set: codisp is stride-subsampled, isolation
-    // depth scans the full eval tail.
+    // Build eval index set: mutating codisp is stride-subsampled
+    // because it churns the reservoir per probe; isolation depth
+    // and stateless codisp scan the full eval tail.
     let eval_indices: Vec<usize> = match scorer {
-        Scorer::IsolationDepth => (train_end..n).collect(),
+        Scorer::IsolationDepth | Scorer::CodispStateless => (train_end..n).collect(),
         Scorer::Codisp => {
             let eval_n = n - train_end;
             let stride = eval_n.div_ceil(CODISP_MAX_EVAL).max(1);
@@ -290,6 +294,9 @@ fn score_file<const D: usize>(
                 .unwrap_or_else(|_| AnomalyScore::new(0.0).expect("zero valid")),
             Scorer::Codisp => forest
                 .score_codisp(&p)
+                .unwrap_or_else(|_| AnomalyScore::new(0.0).expect("zero valid")),
+            Scorer::CodispStateless => forest
+                .score_codisp_stateless(&p)
                 .unwrap_or_else(|_| AnomalyScore::new(0.0).expect("zero valid")),
         };
         raw_scores.push(f64::from(s));
@@ -464,5 +471,15 @@ fn tsb_ad_m_codisp_aggregate_auc_above_floor() {
     assert!(
         overall_auc > 0.55,
         "codisp aggregate weighted AUC = {overall_auc:.3} below floor 0.55"
+    );
+}
+
+#[test]
+#[ignore = "requires RCF_TSB_AD_M_PATH; stateless codisp scans full eval, no reservoir mutation"]
+fn tsb_ad_m_codisp_stateless_aggregate_auc_above_floor() {
+    let overall_auc = run_corpus(Scorer::CodispStateless, "score_codisp_stateless()");
+    assert!(
+        overall_auc > 0.55,
+        "stateless codisp aggregate weighted AUC = {overall_auc:.3} below floor 0.55"
     );
 }
