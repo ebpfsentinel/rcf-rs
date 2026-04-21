@@ -72,6 +72,13 @@ pub struct ThresholdedForest<const D: usize> {
     thresholded: ThresholdedConfig,
     /// Running mean/variance of the per-point anomaly scores.
     stats: EmaStats,
+    /// Streaming quantile estimator over the score stream. Only
+    /// consulted when `thresholded.threshold_mode` is
+    /// [`crate::thresholded::ThresholdMode::Quantile`]. Kept
+    /// populated under both modes so mode swaps at runtime (not
+    /// supported today, but persistence migrations tomorrow) do
+    /// not start from a cold digest.
+    tdigest: crate::TDigest,
     /// Observability sink for threshold-layer events. Distinct from
     /// the inner forest's sink so wrapper-only metrics
     /// (`rcf_process_total`, `rcf_anomalies_fired_total`,
@@ -101,10 +108,12 @@ impl<const D: usize> ThresholdedForest<D> {
     ) -> RcfResult<Self> {
         thresholded.validate()?;
         let stats = EmaStats::new(thresholded.score_decay)?;
+        let tdigest = crate::TDigest::with_default_compression();
         Ok(Self {
             forest,
             thresholded,
             stats,
+            tdigest,
             #[cfg(feature = "std")]
             metrics: crate::metrics::default_sink(),
         })
@@ -159,17 +168,47 @@ impl<const D: usize> ThresholdedForest<D> {
 
     /// Current adaptive threshold. Clamped to the configured floor
     /// whenever the detector has not yet accumulated enough
-    /// observations to trust the running stddev.
+    /// observations to trust the running statistic (stddev under
+    /// `ZSigma`, quantile under `Quantile`).
     #[must_use]
     pub fn current_threshold(&self) -> f64 {
-        let ready = self.stats.observations() >= self.thresholded.min_observations
-            && self.stats.stddev() > 0.0;
-        if ready {
-            let adaptive = self.stats.mean() + self.thresholded.z_factor * self.stats.stddev();
-            adaptive.max(self.thresholded.min_threshold)
-        } else {
-            self.thresholded.min_threshold
+        use crate::thresholded::ThresholdMode;
+        if self.stats.observations() < self.thresholded.min_observations {
+            return self.thresholded.min_threshold;
         }
+        let adaptive = match self.thresholded.threshold_mode {
+            ThresholdMode::ZSigma { z_factor } => {
+                if self.stats.stddev() <= 0.0 {
+                    return self.thresholded.min_threshold;
+                }
+                self.stats.mean() + z_factor * self.stats.stddev()
+            }
+            ThresholdMode::Quantile { p } => {
+                // Force a flush so the query sees every recorded
+                // score; `quantile` does the flush itself, but the
+                // `&self` borrow here forbids it — rely on the
+                // periodic flushes `flush_buffer` does on `record`.
+                match self.tdigest_quantile_readonly(p) {
+                    Some(q) => q,
+                    None => return self.thresholded.min_threshold,
+                }
+            }
+        };
+        adaptive.max(self.thresholded.min_threshold)
+    }
+
+    /// Immutable quantile lookup — equivalent to `TDigest::quantile`
+    /// but clones only the centroids + `min`/`max` so the detector
+    /// can stay `&self`. Cheap when the buffer is empty (expected
+    /// after any `record` call with `buffer_len > compression * 10`),
+    /// but callers on the hot-path should prefer letting the digest
+    /// flush itself.
+    fn tdigest_quantile_readonly(&self, p: f64) -> Option<f64> {
+        if self.tdigest.total_weight() <= 0.0 {
+            return None;
+        }
+        let mut scratch = self.tdigest.clone();
+        scratch.quantile(p)
     }
 
     /// Score `point` against the *current* forest, grade it against
@@ -216,7 +255,7 @@ impl<const D: usize> ThresholdedForest<D> {
         self.forest.update(point)?;
 
         let verdict = self.grade_from_score(score)?;
-        self.stats.update(f64::from(score));
+        self.record_score(f64::from(score));
         #[cfg(feature = "std")]
         self.emit_process_metrics(&verdict);
         Ok(verdict)
@@ -350,6 +389,7 @@ impl<const D: usize> ThresholdedForest<D> {
     /// want to re-enter a warmup phase after a major regime change.
     pub fn reset_stats(&mut self) {
         self.stats.reset();
+        self.tdigest.reset();
     }
 
     /// Retract a previously-observed point from the underlying forest
@@ -410,7 +450,7 @@ impl<const D: usize> ThresholdedForest<D> {
 
         let idx = self.forest.update_indexed(point)?;
         let verdict = self.grade_from_score(score)?;
-        self.stats.update(f64::from(score));
+        self.record_score(f64::from(score));
         #[cfg(feature = "std")]
         self.emit_process_metrics(&verdict);
         Ok((idx, verdict))
@@ -484,34 +524,72 @@ impl<const D: usize> ThresholdedForest<D> {
     }
 
     /// Translate a raw anomaly score into a graded verdict using the
-    /// current running statistics.
+    /// current running statistics. Handles both
+    /// [`crate::thresholded::ThresholdMode`] variants.
     fn grade_from_score(&self, score: AnomalyScore) -> RcfResult<AnomalyGrade> {
-        let stddev = self.stats.stddev();
-        let ready = self.stats.observations() >= self.thresholded.min_observations && stddev > 0.0;
-
-        if !ready {
+        use crate::thresholded::ThresholdMode;
+        if self.stats.observations() < self.thresholded.min_observations {
             return AnomalyGrade::new(score, self.thresholded.min_threshold, 0.0, false, false);
         }
 
-        let adaptive = self.stats.mean() + self.thresholded.z_factor * stddev;
-        let threshold = adaptive.max(self.thresholded.min_threshold);
         let raw = f64::from(score);
+        let (threshold, span) = match self.thresholded.threshold_mode {
+            ThresholdMode::ZSigma { z_factor } => {
+                let stddev = self.stats.stddev();
+                if stddev <= 0.0 {
+                    return AnomalyGrade::new(
+                        score,
+                        self.thresholded.min_threshold,
+                        0.0,
+                        false,
+                        false,
+                    );
+                }
+                let adaptive = self.stats.mean() + z_factor * stddev;
+                let t = adaptive.max(self.thresholded.min_threshold);
+                (t, z_factor * stddev)
+            }
+            ThresholdMode::Quantile { p } => {
+                let Some(q) = self.tdigest_quantile_readonly(p) else {
+                    return AnomalyGrade::new(
+                        score,
+                        self.thresholded.min_threshold,
+                        0.0,
+                        false,
+                        false,
+                    );
+                };
+                let t = q.max(self.thresholded.min_threshold);
+                // Grade span: distance from `p` to `max` on the
+                // empirical distribution. Heavy-tail-aware: a score
+                // at the observed maximum grades 1.0 whatever the
+                // absolute magnitude.
+                let max = self.tdigest.max().unwrap_or(t);
+                let sp = (max - t).max(f64::EPSILON);
+                (t, sp)
+            }
+        };
 
         if raw <= threshold {
             return AnomalyGrade::new(score, threshold, 0.0, false, true);
         }
 
-        // Grade: linearly scaled between `threshold` (0) and
-        // `threshold + z_factor · stddev` (1). This keeps the grade
-        // interpretable in "sigmas above threshold" units regardless
-        // of the absolute score magnitude.
-        let span = self.thresholded.z_factor * stddev;
         let grade = if span > 0.0 {
             ((raw - threshold) / span).clamp(0.0, 1.0)
         } else {
             1.0
         };
         AnomalyGrade::new(score, threshold, grade, true, true)
+    }
+
+    /// Fold `score` into both the EMA (always) and the `TDigest`
+    /// (always — a mode swap should see a populated digest). Kept
+    /// private: every entry point that previously called
+    /// `self.stats.update(f64::from(score))` must route through
+    /// here instead.
+    fn record_score(&mut self, raw: f64) {
+        self.stats.update(raw);
+        self.tdigest.record(raw);
     }
 }
 
@@ -601,6 +679,45 @@ mod tests {
     fn current_threshold_respects_min_floor_during_warmup() {
         let d = detector::<2>(16);
         assert_eq!(d.current_threshold(), 0.0);
+    }
+
+    #[test]
+    fn quantile_threshold_mode_fires_on_tail_spike() {
+        use rand::{Rng, SeedableRng};
+        let mut d = ThresholdedForestBuilder::<2>::new()
+            .num_trees(50)
+            .sample_size(64)
+            .min_observations(16)
+            .min_threshold(0.01)
+            .quantile_threshold(0.95)
+            .seed(19)
+            .build()
+            .unwrap();
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(29);
+        // Warm on in-distribution points.
+        for _ in 0..512 {
+            let a: f64 = rng.random();
+            let b: f64 = rng.random();
+            d.process([a, b]).unwrap();
+        }
+        let warm_threshold = d.current_threshold();
+        assert!(warm_threshold > 0.01, "threshold should lift off the floor");
+        // A heavy outlier should score above the p95 of the warm
+        // distribution → verdict flags `is_anomaly`.
+        let outlier = d.process([100.0, -100.0]).unwrap();
+        assert!(outlier.ready());
+        assert!(outlier.is_anomaly());
+    }
+
+    #[test]
+    fn quantile_threshold_rejects_invalid_p() {
+        let err = ThresholdedForestBuilder::<2>::new()
+            .num_trees(50)
+            .sample_size(64)
+            .quantile_threshold(1.5) // out of (0, 1)
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, RcfError::InvalidConfig(_)));
     }
 
     #[test]

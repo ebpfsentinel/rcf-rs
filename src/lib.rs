@@ -166,7 +166,8 @@ pub use severity::{Severity, SeverityBands};
 pub use shingled::{ShingledForest, ShingledForestBuilder};
 pub use tdigest::{Centroid, DEFAULT_COMPRESSION as TDIGEST_DEFAULT_COMPRESSION, TDigest};
 pub use thresholded::{
-    AnomalyGrade, EmaStats, ThresholdedConfig, ThresholdedForest, ThresholdedForestBuilder,
+    AnomalyGrade, EmaStats, ThresholdMode, ThresholdedConfig, ThresholdedForest,
+    ThresholdedForestBuilder,
 };
 pub use tree::{
     InternalData, LeafData, NodeRef, NodeStore, NodeView, NodeViewMut, PointAccessor, RandomCutTree,

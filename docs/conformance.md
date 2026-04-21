@@ -29,7 +29,12 @@ Extensions beyond the AWS signature:
   forest, inspired by AWS's `TRCF` in `randomcutforest-parkservices`
   but kept light (no short/long duality, no near-threshold
   heuristics). Builder `z_factor`, `min_threshold`,
-  `min_observations`, `score_decay`.
+  `min_observations`, `score_decay`. Two `ThresholdMode` variants:
+  legacy `ZSigma { z_factor }` (`μ + z·σ` on EMA) or new
+  `Quantile { p }` (streaming `TDigest` p99/p99.9) — the latter is
+  the recommended path because isolation-depth scores are
+  right-skewed, not Gaussian. Opt in via
+  `ThresholdedForestBuilder::quantile_threshold(p)`.
 - `forensic_baseline(&point)` — repurposes the AWS `ImputeVisitor`
   concept as a per-dim *"what would this have looked like under
   the live baseline?"* SOC triage helper. Returns raw-space

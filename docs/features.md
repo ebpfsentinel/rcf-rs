@@ -37,6 +37,20 @@ Built via `ThresholdedForestBuilder<D>`. API: `process`,
 `process_indexed`, `score_only`, `current_threshold`, `stats`,
 `reset_stats`.
 
+**Two threshold modes** (see `ThresholdMode`):
+
+- `ZSigma { z_factor }` (default, back-compat): `threshold =
+  max(min_threshold, mean + z_factor × stddev)` on the EMA stats.
+  Good for Gaussian-like scores (lag-embedded streams with
+  symmetric noise).
+- `Quantile { p }`: `threshold = tdigest.quantile(p)` of the
+  streaming score distribution. Robust to the right-skew of
+  isolation-depth scores; calibrates directly on the caller's
+  alert-rate budget (`p = 0.99` ≈ 1 % firing rate in steady
+  state; `0.999` ≈ 0.1 %). Uses the shipped `TDigest` primitive
+  — no extra deps. Enable via `.quantile_threshold(p)` on the
+  builder.
+
 Source: `src/thresholded/`.
 
 Example: `examples/thresholded.rs`.

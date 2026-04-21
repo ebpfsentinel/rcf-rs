@@ -46,8 +46,8 @@ pub mod grade;
 pub mod stats;
 
 pub use config::{
-    DEFAULT_MIN_OBSERVATIONS, DEFAULT_MIN_THRESHOLD, DEFAULT_SCORE_DECAY, DEFAULT_Z_FACTOR,
-    ThresholdedConfig, ThresholdedForestBuilder,
+    DEFAULT_MIN_OBSERVATIONS, DEFAULT_MIN_THRESHOLD, DEFAULT_QUANTILE, DEFAULT_SCORE_DECAY,
+    DEFAULT_Z_FACTOR, ThresholdMode, ThresholdedConfig, ThresholdedForestBuilder,
 };
 pub use detector::ThresholdedForest;
 pub use grade::AnomalyGrade;

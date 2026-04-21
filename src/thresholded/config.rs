@@ -19,8 +19,15 @@ use crate::thresholded::detector::ThresholdedForest;
 
 /// Default `z_factor` — 3 standard deviations above the running mean,
 /// matching the AWS `SageMaker` RCF guidance ("scores beyond 3σ are
-/// considered anomalous").
+/// considered anomalous"). Only meaningful under
+/// [`ThresholdMode::ZSigma`].
 pub const DEFAULT_Z_FACTOR: f64 = 3.0;
+
+/// Default streaming quantile used when
+/// [`ThresholdMode::Quantile`] is selected — `0.99` lets 1 % of
+/// scores cross the threshold in steady state, matching the typical
+/// SOC alert-rate budget.
+pub const DEFAULT_QUANTILE: f64 = 0.99;
 
 /// Default EMA smoothing factor on the anomaly-score stream. `0.01`
 /// corresponds to an effective memory window of ~100 points.
@@ -33,13 +40,58 @@ pub const DEFAULT_MIN_OBSERVATIONS: u64 = 32;
 /// Default absolute floor on the adaptive threshold.
 pub const DEFAULT_MIN_THRESHOLD: f64 = 1.0;
 
+/// Which statistic drives the adaptive threshold. Isolation-depth
+/// scores are right-skewed and heavy-tailed (not Gaussian), so the
+/// `μ + z·σ` form systematically over-flags during baseline calm
+/// periods and under-flags during drift. [`ThresholdMode::Quantile`]
+/// uses a streaming `TDigest` of the score distribution and thresholds
+/// on the chosen tail percentile — closer to the caller's actual
+/// alert-rate budget (e.g. `p = 0.99` ≈ 1 % firing rate).
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ThresholdMode {
+    /// Classic `mean + z · stddev` on the EMA of the score stream.
+    /// Back-compat default; keep this mode for Gaussian-like scores
+    /// (lag-embedded streams with symmetric noise).
+    ZSigma {
+        /// Multiplier on the EMA stddev.
+        z_factor: f64,
+    },
+    /// Streaming quantile threshold — `threshold = TDigest.quantile(p)`
+    /// of observed scores. Robust to the isolation-depth right-skew;
+    /// calibrates directly on the caller's alert-rate budget. `p`
+    /// must be in `(0, 1)`; typical values are `0.99` / `0.999`.
+    Quantile {
+        /// Quantile used as the threshold. Higher `p` means a
+        /// stricter threshold (fewer firings).
+        p: f64,
+    },
+}
+
+impl Default for ThresholdMode {
+    fn default() -> Self {
+        Self::ZSigma {
+            z_factor: DEFAULT_Z_FACTOR,
+        }
+    }
+}
+
 /// Validated configuration of the adaptive-threshold layer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ThresholdedConfig {
     /// Multiplier on the score stddev used to derive the adaptive
-    /// threshold: `threshold = max(min_threshold, mean + z_factor · stddev)`.
+    /// threshold when [`Self::threshold_mode`] is
+    /// [`ThresholdMode::ZSigma`]. Kept as a top-level field for
+    /// back-compat — callers constructing via struct literal get
+    /// the legacy behaviour without opt-in. Ignored under
+    /// [`ThresholdMode::Quantile`].
     pub z_factor: f64,
+    /// Selects whether the threshold is driven by the EMA's
+    /// `mean + z·σ` or by a streaming quantile of the score
+    /// distribution. Defaults to [`ThresholdMode::ZSigma`].
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub threshold_mode: ThresholdMode,
     /// EMA smoothing factor on the score stream. Must be in `(0, 1]`.
     pub score_decay: f64,
     /// Samples required before the detector stops emitting
@@ -53,6 +105,7 @@ impl Default for ThresholdedConfig {
     fn default() -> Self {
         Self {
             z_factor: DEFAULT_Z_FACTOR,
+            threshold_mode: ThresholdMode::default(),
             score_decay: DEFAULT_SCORE_DECAY,
             min_observations: DEFAULT_MIN_OBSERVATIONS,
             min_threshold: DEFAULT_MIN_THRESHOLD,
@@ -70,6 +123,25 @@ impl ThresholdedConfig {
     /// `score_decay` finite and in `(0, 1]`, `min_threshold` finite
     /// and non-negative.
     pub fn validate(&self) -> RcfResult<()> {
+        match self.threshold_mode {
+            ThresholdMode::ZSigma { z_factor } => {
+                if !z_factor.is_finite() || z_factor <= 0.0 {
+                    return Err(RcfError::InvalidConfig(format!(
+                        "z_factor must be finite and > 0, got {z_factor}"
+                    )));
+                }
+            }
+            ThresholdMode::Quantile { p } => {
+                if !p.is_finite() || !(0.0..1.0).contains(&p) || p <= 0.0 {
+                    return Err(RcfError::InvalidConfig(format!(
+                        "Quantile p must be in (0.0, 1.0), got {p}"
+                    )));
+                }
+            }
+        }
+        // The legacy `z_factor` field is still validated so callers
+        // building via struct literal (without touching
+        // `threshold_mode`) still get the strictness they used to.
         if !self.z_factor.is_finite() || self.z_factor <= 0.0 {
             return Err(RcfError::InvalidConfig(format!(
                 "z_factor must be finite and > 0, got {}",
@@ -191,10 +263,24 @@ impl<const D: usize> ThresholdedForestBuilder<D> {
         self
     }
 
-    /// Override the threshold's z-factor.
+    /// Override the threshold's z-factor. Implies
+    /// [`ThresholdMode::ZSigma`] — mutually exclusive with
+    /// [`Self::quantile_threshold`]; the last call wins.
     #[must_use]
     pub fn z_factor(mut self, z: f64) -> Self {
         self.thresholded.z_factor = z;
+        self.thresholded.threshold_mode = ThresholdMode::ZSigma { z_factor: z };
+        self
+    }
+
+    /// Drive the threshold from a streaming quantile of the score
+    /// distribution instead of the Gaussian `μ + z·σ`. `p` is the
+    /// target tail quantile — `0.99` budgets ~1 % alert rate in
+    /// steady state, `0.999` ~0.1 %. Mutually exclusive with
+    /// [`Self::z_factor`]; the last call wins.
+    #[must_use]
+    pub fn quantile_threshold(mut self, p: f64) -> Self {
+        self.thresholded.threshold_mode = ThresholdMode::Quantile { p };
         self
     }
 
@@ -267,6 +353,7 @@ mod tests {
     fn cfg(z: f64, decay: f64, min_obs: u64, min_thr: f64) -> ThresholdedConfig {
         ThresholdedConfig {
             z_factor: z,
+            threshold_mode: ThresholdMode::ZSigma { z_factor: z },
             score_decay: decay,
             min_observations: min_obs,
             min_threshold: min_thr,
