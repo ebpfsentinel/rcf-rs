@@ -14,15 +14,15 @@ cargo bench -- --sample-size 10 --measurement-time 2   # quick
 
 ## Reference hardware
 
-| | |
-|---|---|
-| CPU | Intel Core i7-1370P (13th gen), 14C/20T, L3 24 MiB |
-| Memory | 32 GB DDR5 |
-| Kernel | Linux 6.17 |
-| Allocator | mimalloc 0.1 (pinned in bench harness) |
-| Compiler | rustc 1.95 stable |
+|           |                                                    |
+| --------- | -------------------------------------------------- |
+| CPU       | Intel Core i7-1370P (13th gen), 14C/20T, L3 24 MiB |
+| Memory    | 32 GB DDR5                                         |
+| Kernel    | Linux 6.17                                         |
+| Allocator | mimalloc 0.1 (pinned in bench harness)             |
+| Compiler  | rustc 1.95 stable                                  |
 
-Absolute values scale with CPU / memory bandwidth; *ratios*
+Absolute values scale with CPU / memory bandwidth; _ratios_
 (parallel speedup, early-term savings, tenant scaling) are the
 portable signal.
 
@@ -37,31 +37,64 @@ portable signal.
 
 ## Core ops
 
-`(trees=100, sample=256, D=16)` after split-typed-arena refactor
-(persistence v4):
+`(trees=100, sample=256, D=16)` single-seed on the current
+thermal state (warm CPU — absolute numbers drift across sessions
+as documented in Caveats):
 
-| Workload | Time | Throughput |
-|---|---|---|
-| `forest_update` | ~23 µs | 43k/s |
-| `forest_score` | ~23 µs | 43k/s |
-| `forest_attribution` | ~31 µs | 32k/s |
+| Workload                              | Time    | Throughput |
+| ------------------------------------- | ------- | ---------- |
+| `forest_update`                       | ~52 µs  | ~19 k/s    |
+| `forest_score`                        | ~61 µs  | ~16 k/s    |
+| `forest_attribution`                  | ~92 µs  | ~11 k/s    |
+| `forest_score_and_attribution`        | ~83 µs  | ~12 k/s    |
+| `forest_split_score_then_attribution` | ~160 µs | ~6 k/s     |
 
-Refactor delta vs pre-v4 at the same config: update −28 %,
-score −10 %, attribution −37 %. Leaf-arena memory −90 %
-(~320 B → ~40 B per slot).
+The fused `score_and_attribution` walk is **~48 % faster** than
+calling `score` + `attribution` back-to-back (single traversal
+instead of two). The fused bbox SIMD kernel
+(`total_probability_of_cut`) saves one pass over `min`/`max` loads
+per internal node. Post split-typed-arena refactor (persistence
+v4) leaf arena memory is −90 % (~320 B → ~40 B per slot).
 
-Other `(trees, samples, D)` tuples: criterion HTML report
-(`target/criterion/`).
+Other `(trees, samples, D)` tuples below:
+
+| Config           | `forest_update` | `forest_score` | `forest_attribution` |
+| ---------------- | --------------- | -------------- | -------------------- |
+| `(50, 128, 16)`  | ~49 µs          | ~45 µs         | —                    |
+| `(100, 256, 4)`  | ~42 µs          | ~56 µs         | ~63 µs               |
+| `(100, 256, 16)` | ~52 µs          | ~61 µs         | ~92 µs               |
+| `(100, 256, 64)` | ~138 µs         | ~110 µs        | ~162 µs              |
+| `(200, 512, 16)` | ~85 µs          | ~82 µs         | —                    |
+
+Criterion HTML report lives at `target/criterion/`.
 
 ## Bulk batch scoring
 
 `D=16`, forest `(100, 256)`:
 
 | Batch size | `score_many` (parallel) | Serial loop | Speedup |
-|---|---|---|---|
-| 64 | 440 µs | 2.19 ms | 5.0× |
-| 512 | 3.17 ms | 19.5 ms | 6.1× |
-| 4096 | 24.1 ms | 146 ms | 6.0× |
+| ---------- | ----------------------- | ----------- | ------- |
+| 64         | 1.04 ms                 | 3.68 ms     | 3.5×    |
+| 512        | 6.28 ms                 | 52.1 ms     | 8.3×    |
+| 4096       | 44.2 ms                 | 277.9 ms    | 6.3×    |
+
+### Codisp batched scoring
+
+Probe-based codisp batched API (`score_codisp_many`) pre-inserts
+probes into every tree, shared-walk amortises per-tree leaf →
+root descent, rayon across trees:
+
+| Batch K | `score_codisp_many` | `score_codisp` loop | Speedup |
+| ------- | ------------------- | ------------------- | ------- |
+| 16      | 2.92 ms             | 3.94 ms             | 1.3×    |
+| 64      | 10.9 ms             | 16.4 ms             | 1.5×    |
+
+Gain caps at ~1.5× because insert/delete mutation phases still
+scale with `K × num_trees`; only the walk phase benefits from
+shared-walk. For **frozen-baseline batched codisp** on any batch
+size, prefer `score_codisp_stateless_many` (single-probe stateless
+codisp mapped in parallel — no reservoir mutation, no `O(K)`
+saturation limit).
 
 ### Memory-bandwidth plateau @ ~6× / 14 C
 
@@ -76,7 +109,7 @@ threads contend rather than scale. Two avenues have been explored:
   Sorting probes by leading-dim quantised key groups similar tree
   descents so each rayon worker re-uses warm arena cache lines.
   At `k = 1024`, `D = 16`, correlated cluster: plain `score_many`
-  4.62 ms, sorted variant 5.27 ms — the `O(N log N)` sort + double
+  7.19 ms, sorted variant 8.25 ms — the `O(N log N)` sort + double
   gather outweighs the cache gain on uniformly-random batches.
   Callers with strongly-correlated batches (SOC alert replay of a
   single flow, periodic tenant-scan) can bench their own workload
@@ -96,13 +129,13 @@ threads contend rather than scale. Two avenues have been explored:
 
 `D=16`, forest `(100, 256)`, single probe:
 
-| Path | Time |
-|---|---|
-| `score` (parallel ensemble) | 36 µs |
-| `score_early_term` threshold=0.02 (tight) | 59 µs |
-| `score_early_term` threshold=0.20 (loose, stops ~20 trees) | 8.4 µs |
+| Path                                                       | Time   |
+| ---------------------------------------------------------- | ------ |
+| `score` (parallel ensemble)                                | 56 µs  |
+| `score_early_term` threshold=0.02 (tight)                  | 74 µs  |
+| `score_early_term` threshold=0.20 (loose, stops ~20 trees) | 9.8 µs |
 
-Loose threshold → 4.3× speedup on baseline-dominated traffic;
+Loose threshold → 5.7× speedup on baseline-dominated traffic;
 tight threshold loses to parallel `score` (sequential walk
 rarely short-circuits).
 
@@ -110,30 +143,33 @@ rarely short-circuits).
 
 `forensic_baseline`:
 
-| `(trees, samples, D)` | Time |
-|---|---|
-| `(100, 256, 4)` | 68 µs |
-| `(100, 256, 16)` | 79 µs |
-| `(100, 1024, 16)` | 315 µs |
+| `(trees, samples, D)` | Time  |
+| --------------------- | ----- |
+| `(100, 256, 4)`       | 16 µs |
+| `(100, 256, 16)`      | 35 µs |
+| `(100, 1024, 16)`     | 79 µs |
 
 Cost ≈ `O(live_points × D)` Welford sweep — `sample_size` ×4
-→ ×4 time, dim cost marginal.
+→ ×4 time (actually ×2.3 on the current run — rayon fan-out
+hides some of the scaling), dim cost grows ~2× over 4 → 16.
 
 ## Tenant pool at scale
 
 `tenant_pool`, each tenant `D=4` / `(50, 64)`, warmed 128 samples:
 
-| N | `similarity_matrix` | `score_across_tenants` | `most_similar_top5` |
-|---|---|---|---|
-| 32 | 48 µs | 136 µs | 0.70 µs |
-| 128 | 131 µs | 456 µs | 2.2 µs |
-| 512 | 1.48 ms | 6.69 ms | 9.1 µs |
+| N   | `similarity_matrix` | `score_across_tenants` | `most_similar_top5` |
+| --- | ------------------- | ---------------------- | ------------------- |
+| 32  | 56 µs               | 204 µs                 | 0.37 µs             |
+| 128 | 165 µs              | 787 µs                 | 1.25 µs             |
+| 512 | 956 µs              | 4.27 ms                | —                   |
 
 Scaling `N=32→512` (16× tenants):
-- `similarity_matrix` O(N²) parallelised: 31× (not 256× —
-  rayon fan-out hides quadratic until core saturation).
-- `score_across_tenants` O(N) parallelised: 49×.
-- `most_similar_top5` O(N·log k) bounded heap: 13×.
+
+- `similarity_matrix` O(N²) parallelised: 17× (rayon fan-out
+  hides quadratic until core saturation).
+- `score_across_tenants` O(N) parallelised: 21×.
+- `most_similar_top5` O(N·log k) bounded heap at `N=128`: 3.4×
+  vs `N=32`.
 
 ## External baselines (synthetic)
 
@@ -143,13 +179,14 @@ frozen baseline. Each impl on its idiomatic fast path
 / AWS Java cold JVM). **5-seed variance** (seeds 2026–2030),
 mean ± stddev, coefficient of variation in parens.
 
-| Impl | Backend | Updates/s | Scores/s | AUC |
-|---|---|---|---|---|
-| `rcf-rs` 0.0.0-dev, `score()` | Rust, rayon-parallel | **17 500 ± 1 240** (7 %) | 125 900 ± 1 840 (1.5 %) | 1.000 ± 0 |
-| `rcf-rs` 0.0.0-dev, `score_codisp()` | Rust, serial per probe | — (uses insert/delete per probe) | ~1 140 (single seed) | 1.000 |
-| `randomcutforest-java` 4.4.0 | JVM 26, cold | 2 090 ± 134 (6 %) | 8 870 ± 415 (5 %) | 1.000 ± 0 |
-| `rrcf` 0.4.4 | Python + NumPy | 73 ± 3 (4 %) | 94 150 ± 4 840 (5 %) | 0.992 ± 0 |
-| `sklearn.IsolationForest` | NumPy + Cython | batch-only | **136 300 ± 2 450** (2 %) | 1.000 ± 0 |
+| Impl                                   | Backend              | Updates/s                   | Scores/s                  | AUC       |
+| -------------------------------------- | -------------------- | --------------------------- | ------------------------- | --------- |
+| `rcf-rs` 0.0.0-dev, `score()`          | Rust, rayon-parallel | **13 700** (single seed)    | **140 400** (single seed) | 1.000     |
+| `rcf-rs` 0.0.0-dev, `score_codisp()`   | Rust, parallel walk  | — (per-probe insert/delete) | 5 540 (single seed)       | 1.000     |
+| `rcf-rs` 0.0.0-dev, `score()` (5-seed) | Rust, rayon-parallel | 17 500 ± 1 240 (7 %)        | 125 900 ± 1 840 (1.5 %)   | 1.000 ± 0 |
+| `randomcutforest-java` 4.4.0           | JVM 26, cold         | 2 090 ± 134 (6 %)           | 8 870 ± 415 (5 %)         | 1.000 ± 0 |
+| `rrcf` 0.4.4                           | Python + NumPy       | 73 ± 3 (4 %)                | 94 150 ± 4 840 (5 %)      | 0.992 ± 0 |
+| `sklearn.IsolationForest`              | NumPy + Cython       | batch-only                  | 136 300 ± 2 450 (2 %)     | 1.000 ± 0 |
 
 Ratios (mean/mean):
 
@@ -161,11 +198,12 @@ Ratios (mean/mean):
   10k delta is ~3σ significant). rrcf trails rcf-rs by ~25 %;
   AWS Java trails by ~14×.
 - **Scores (codisp path)**: rcf-rs `score_codisp()` mutates the
-  forest per probe (insert → walk leaf→root → delete) so it is
-  two orders of magnitude slower than `score()` — ~1.1k probes/s
-  at the same `(100, 256, D=16)` config. Matches AWS Java
-  `getAnomalyScore` / rrcf `codisp()` semantic; use it for SOC
-  triage / forensic replay, not the eBPF hot path.
+  forest per probe (insert → walk leaf→root → delete). Post the
+  rayon-per-tree parallel refactor it hits ~5.5 k probes/s at
+  `(100, 256, D=16)` — ~25× slower than the isolation-depth
+  `score()` fast path. Matches AWS Java `getAnomalyScore` / rrcf
+  `codisp()` semantic; use it for SOC triage / forensic replay,
+  not the eBPF hot path.
 - **AUC**: identical within measurement precision across every
   seed (0.992 for rrcf, 1.000 for the other three).
 
@@ -190,7 +228,7 @@ Three scoring APIs, three trade-offs:
   smooth(0.02) pipeline.
 - **`RandomCutForest::score_codisp()`** — probe-based (insert,
   walk leaf→root accumulating `max(sibling.mass /
-  subtree.mass)`, remove). Matches rrcf / AWS Java scoring
+subtree.mass)`, remove). Matches rrcf / AWS Java scoring
   semantic. ~30× slower than `score()` and **mutates the
   reservoir** — insertion evicts baseline points the following
   `delete` cannot restore, so long eval streams drift away from
@@ -198,7 +236,7 @@ Three scoring APIs, three trade-offs:
   AUC, beats rrcf (0.748) and AWS Java (0.757).
 - **`RandomCutForest::score_codisp_stateless()`** — root → leaf
   walk along stored cuts, accumulates `max(sibling_mass /
-  subtree_mass)` per level without inserting the probe. Preserves
+subtree_mass)` per level without inserting the probe. Preserves
   the frozen-baseline promise exactly, takes `&self`, rayon-
   parallel across trees. On NAB: **0.763** aggregate AUC
   (**~0.013 shy of mutating codisp, ~0.044 above `score()`**).
@@ -211,34 +249,34 @@ runs the 7-file corpus in parallel via rayon `par_iter` over
 files — each file owns an independent forest. Full run
 (both variants, parallel file iter) completes in ~12 s.
 
-| File | `score()` | `score_codisp()` | `score_codisp_stateless()` | rrcf | AWS Java |
-|---|---|---|---|---|---|
-| `ambient_temperature_system_failure` | **0.813** | **0.813** | 0.793 | 0.734 | 0.786 |
-| `cpu_utilization_asg_misconfiguration` | 0.953 | **0.969** | 0.963 | 0.849 | 0.906 |
-| `ec2_request_latency_system_failure` | **0.709** | 0.706 | 0.621 | 0.481 | 0.482 |
-| `machine_temperature_system_failure` | 0.578 | **0.817** | 0.815 | 0.880 | 0.883 |
-| `nyc_taxi` | **0.698** | 0.636 | 0.623 | 0.571 | 0.540 |
-| `rogue_agent_key_hold` | 0.145 | 0.198 | 0.181 | 0.535 | **0.633** |
-| `rogue_agent_key_updown` | **0.633** | 0.579 | 0.563 | 0.657 | 0.542 |
-| **weighted aggregate** | 0.719 | **0.776** | 0.763 | 0.748 | 0.757 |
+| File                                   | `score()` | `score_codisp()` | `score_codisp_stateless()` | rrcf  | AWS Java  |
+| -------------------------------------- | --------- | ---------------- | -------------------------- | ----- | --------- |
+| `ambient_temperature_system_failure`   | **0.813** | **0.813**        | 0.793                      | 0.734 | 0.786     |
+| `cpu_utilization_asg_misconfiguration` | 0.953     | **0.969**        | 0.963                      | 0.849 | 0.906     |
+| `ec2_request_latency_system_failure`   | **0.709** | 0.706            | 0.621                      | 0.481 | 0.482     |
+| `machine_temperature_system_failure`   | 0.578     | **0.817**        | 0.815                      | 0.880 | 0.883     |
+| `nyc_taxi`                             | **0.698** | 0.636            | 0.623                      | 0.571 | 0.540     |
+| `rogue_agent_key_hold`                 | 0.145     | 0.198            | 0.181                      | 0.535 | **0.633** |
+| `rogue_agent_key_updown`               | **0.633** | 0.579            | 0.563                      | 0.657 | 0.542     |
+| **weighted aggregate**                 | 0.719     | **0.776**        | 0.763                      | 0.748 | 0.757     |
 
 ### Hyperparameter ablation
 
 `examples/nab_ablation.rs` on the same corpus:
 
-| Config | Aggregate AUC |
-|---|---|
-| baseline (lag=8, raw score) | 0.615 |
-| lag=32 | 0.665 |
-| lag=32 + diff | 0.640 |
-| lag=32 + zscore | 0.683 |
-| lag=32 + smooth(0.1) | 0.687 |
-| lag=32 + zscore + smooth(0.05) | 0.718 |
-| **lag=32 + zscore + smooth(0.02)** | **0.719** |
-| lag=64 + zscore + smooth(0.05) | 0.672 |
-| trcf-online D=32 | 0.320 |
-| probe-score D=8 (naive hack) | 0.330 |
-| **codisp D=32 + zscore + smooth(0.02)** | **0.776** |
+| Config                                  | Aggregate AUC |
+| --------------------------------------- | ------------- |
+| baseline (lag=8, raw score)             | 0.615         |
+| lag=32                                  | 0.665         |
+| lag=32 + diff                           | 0.640         |
+| lag=32 + zscore                         | 0.683         |
+| lag=32 + smooth(0.1)                    | 0.687         |
+| lag=32 + zscore + smooth(0.05)          | 0.718         |
+| **lag=32 + zscore + smooth(0.02)**      | **0.719**     |
+| lag=64 + zscore + smooth(0.05)          | 0.672         |
+| trcf-online D=32                        | 0.320         |
+| probe-score D=8 (naive hack)            | 0.330         |
+| **codisp D=32 + zscore + smooth(0.02)** | **0.776**     |
 
 - **Longer embedding** (lag=32) captures wider context — +0.050.
 - **Z-score per warm-phase dim stddev** compensates NAB's scale
@@ -306,26 +344,26 @@ but wall-time is prohibitive on the full corpus — ~3–4 h at
 14 workers / `--max-eval 1500`. Numbers are left for the reader
 to reproduce; the script is provided for reproducibility.
 
-| Source dataset | Files | `score()` | `score_codisp()` | `score_codisp_stateless()` | AWS Java |
-|---|---|---|---|---|---|
-| Genesis | 1 | 0.968 | **0.991** | **0.994** | 0.982 |
-| SMAP | 27 | 0.803 | **0.823** | 0.716 | 0.805 |
-| SMD | 22 | 0.618 | **0.760** | 0.752 | 0.806 |
-| MSL | 16 | **0.705** | 0.746 | 0.599 | 0.762 |
-| SVDB | 31 | 0.692 | 0.737 | **0.779** | 0.757 |
-| LTDB | 5 | 0.601 | 0.755 | **0.758** | 0.755 |
-| Exathlon | 27 | 0.491 | 0.894 | **0.996** | 0.865 |
-| MITDB | 13 | 0.597 | **0.678** | 0.603 | 0.660 |
-| PSM | 1 | 0.608 | 0.595 | 0.613 | **0.611** |
-| CATSv2 | 6 | **0.580** | 0.547 | 0.496 | 0.547 |
-| CreditCard | 1 | 0.589 | 0.679 | 0.658 | **0.693** |
-| Daphnet | 1 | 0.309 | 0.885 | **0.926** | 0.944 |
-| GECCO | 1 | 0.412 | 0.523 | **0.753** | 0.594 |
-| GHL | 25 | 0.454 | 0.461 | **0.570** | 0.419 |
-| OPPORTUNITY | 8 (skipped D=248) | — | — | — | 0.298 |
-| SWaT | 2 | 0.282 | **0.825** | 0.715 | 0.825 |
-| TAO | 13 | 0.451 | 0.453 | **0.487** | 0.471 |
-| **aggregate weighted** | **192 / 200** | **0.583** | **0.768** | **0.751** | **0.753** |
+| Source dataset         | Files             | `score()` | `score_codisp()` | `score_codisp_stateless()` | AWS Java  |
+| ---------------------- | ----------------- | --------- | ---------------- | -------------------------- | --------- |
+| Genesis                | 1                 | 0.968     | **0.991**        | **0.994**                  | 0.982     |
+| SMAP                   | 27                | 0.803     | **0.823**        | 0.716                      | 0.805     |
+| SMD                    | 22                | 0.618     | **0.760**        | 0.752                      | 0.806     |
+| MSL                    | 16                | **0.705** | 0.746            | 0.599                      | 0.762     |
+| SVDB                   | 31                | 0.692     | 0.737            | **0.779**                  | 0.757     |
+| LTDB                   | 5                 | 0.601     | 0.755            | **0.758**                  | 0.755     |
+| Exathlon               | 27                | 0.491     | 0.894            | **0.996**                  | 0.865     |
+| MITDB                  | 13                | 0.597     | **0.678**        | 0.603                      | 0.660     |
+| PSM                    | 1                 | 0.608     | 0.595            | **0.613**                  | 0.611     |
+| CATSv2                 | 6                 | **0.580** | 0.547            | 0.496                      | 0.547     |
+| CreditCard             | 1                 | 0.589     | 0.679            | 0.658                      | **0.693** |
+| Daphnet                | 1                 | 0.309     | 0.885            | **0.926**                  | 0.944     |
+| GECCO                  | 1                 | 0.412     | 0.523            | **0.753**                  | 0.594     |
+| GHL                    | 25                | 0.454     | 0.461            | **0.570**                  | 0.419     |
+| OPPORTUNITY            | 8 (skipped D=248) | —         | —                | —                          | 0.298     |
+| SWaT                   | 2                 | 0.282     | **0.825**        | 0.715                      | 0.825     |
+| TAO                    | 13                | 0.451     | 0.453            | **0.487**                  | 0.471     |
+| **aggregate weighted** | **192 / 200**     | 0.583     | **0.768**        | 0.751                      | 0.753     |
 
 - **rcf-rs `score()`** — isolation depth, rayon-parallel, full
   eval scan. Same fast API eBPFsentinel ships on the hot path.
@@ -355,6 +393,7 @@ to reproduce; the script is provided for reproducibility.
   skips.
 
 Caveats:
+
 - **Plain point-wise ROC-AUC**; the official TSB-AD leaderboard
   ranks on **VUS-PR** (Paparrizos et al. 2022) which integrates
   range-based precision / recall across a sliding window.
