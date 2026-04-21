@@ -838,6 +838,56 @@ impl<const D: usize> RandomCutForest<D> {
         Ok(score)
     }
 
+    /// Batched stateless codisp — aligns with the frozen-baseline
+    /// semantic by construction. Each probe is scored via
+    /// [`Self::score_codisp_stateless`] (root → leaf walk, no
+    /// reservoir mutation) and rayon fans out across probes on top
+    /// of the per-tree parallelism inside each call.
+    ///
+    /// This is the P2 fix for [`Self::score_codisp_many`]'s
+    /// large-batch failure: the mutating batched variant hits
+    /// `EmptyForest` on batches larger than `sample_size` because
+    /// pre-inserted probes saturate the reservoir. The stateless
+    /// batched path has no insertion step, so batch size is only
+    /// bounded by memory.
+    ///
+    /// Semantic: identical to looping [`Self::score_codisp_stateless`]
+    /// over the batch. Use this path whenever the caller needs the
+    /// codisp signal without mutating the baseline — forensic
+    /// replay, SOC triage over a captured window, or any
+    /// long-stream evaluation where drift is a concern.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Self::score_codisp_stateless`] errors.
+    pub fn score_codisp_stateless_many(
+        &self,
+        points: &[[f64; D]],
+    ) -> RcfResult<Vec<AnomalyScore>> {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let run = || {
+                points
+                    .par_iter()
+                    .map(|p| self.score_codisp_stateless(p))
+                    .collect::<RcfResult<Vec<_>>>()
+            };
+            if let Some(pool) = self.pool.as_deref() {
+                pool.install(run)
+            } else {
+                run()
+            }
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            points
+                .iter()
+                .map(|p| self.score_codisp_stateless(p))
+                .collect()
+        }
+    }
+
     /// Batched probe-based codisp — amortises the per-probe
     /// insert / delete overhead by pre-inserting all `points` into
     /// every tree, walking leaf → root with a **shared-walk cache**
@@ -862,6 +912,14 @@ impl<const D: usize> RandomCutForest<D> {
     /// unrelated, uncorrelated probes this is negligible; for
     /// correlated probes the bias can be material. Caller picks the
     /// trade-off: throughput vs purity.
+    ///
+    /// Batches larger than `sample_size` will saturate every tree's
+    /// reservoir and the call returns [`RcfError::EmptyForest`]
+    /// (every probe's `leaf_of` misses in at least one tree once
+    /// the pre-insert rewrite is complete). Callers that need
+    /// frozen-baseline batched codisp on arbitrary-size batches
+    /// should prefer [`Self::score_codisp_stateless_many`] — same
+    /// semantic, no reservoir mutation, no drift.
     ///
     /// Secondary effect: batched inserts are more likely to evict
     /// reservoir points than one-at-a-time inserts would (a larger
@@ -2208,6 +2266,68 @@ mod tests {
             f.score_codisp_stateless(&[f64::NAN, 0.0]).unwrap_err(),
             RcfError::NaNValue
         ));
+    }
+
+    #[test]
+    fn score_codisp_stateless_many_empty_input() {
+        let mut f = small_forest();
+        for _ in 0..50 {
+            f.update([0.1, 0.2]).unwrap();
+        }
+        let out = f.score_codisp_stateless_many(&[]).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn score_codisp_stateless_many_matches_single_probe_loop() {
+        let mut f = small_forest();
+        for i in 0..200 {
+            #[allow(clippy::cast_precision_loss)]
+            let v = i as f64 * 0.01;
+            f.update([v, v + 0.5]).unwrap();
+        }
+        let probes = [[0.5, 1.0], [5.0, -3.0], [0.2, 0.7]];
+        let single: Vec<f64> = probes
+            .iter()
+            .map(|p| f64::from(f.score_codisp_stateless(p).unwrap()))
+            .collect();
+        let batched: Vec<f64> = f
+            .score_codisp_stateless_many(&probes)
+            .unwrap()
+            .into_iter()
+            .map(f64::from)
+            .collect();
+        assert_eq!(single.len(), batched.len());
+        for (a, b) in single.iter().zip(batched.iter()) {
+            assert!((a - b).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn score_codisp_stateless_many_handles_large_batch() {
+        // The mutating score_codisp_many fails once the batch exceeds
+        // sample_size (reservoir saturation). The stateless variant
+        // must handle any batch size since it never inserts.
+        let mut f = small_forest();
+        for i in 0..200 {
+            #[allow(clippy::cast_precision_loss)]
+            let v = i as f64 * 0.01;
+            f.update([v, v + 0.5]).unwrap();
+        }
+        let n_probes = 10_000; // far larger than sample_size
+        let probes: Vec<[f64; 2]> = (0..n_probes)
+            .map(|i| {
+                #[allow(clippy::cast_precision_loss)]
+                let x = (i as f64) * 0.001;
+                [x, x + 0.5]
+            })
+            .collect();
+        let out = f.score_codisp_stateless_many(&probes).unwrap();
+        assert_eq!(out.len(), n_probes);
+        for s in &out {
+            let v: f64 = (*s).into();
+            assert!(v.is_finite() && v >= 0.0);
+        }
     }
 
     #[test]
