@@ -48,9 +48,7 @@ fn main() {
     let first_score = detector.score(&p_shift).unwrap();
     let _ = adwin.update(f64::from(first_score));
     let spawned = detector.on_drift().unwrap();
-    println!(
-        "regime shift detected (score {first_score:.3}), shadow spawned = {spawned}"
-    );
+    println!("regime shift detected (score {first_score:.3}), shadow spawned = {spawned}");
 
     for _ in 0..2_000 {
         let p = [5.0, 5.0, 5.0, 5.0];

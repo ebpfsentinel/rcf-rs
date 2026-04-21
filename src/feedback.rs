@@ -32,7 +32,10 @@
 
 #![cfg(feature = "std")]
 
+use std::sync::Arc;
+
 use crate::error::{RcfError, RcfResult};
+use crate::metrics::{MetricsSink, default_sink, names};
 
 /// Default kernel bandwidth. Smaller `sigma` → only near-duplicate
 /// labels influence the probe; larger `sigma` → every stored label
@@ -92,6 +95,13 @@ pub struct FeedbackStore<const D: usize> {
     /// Coefficient multiplied by the kernel-weighted label sum
     /// before it is added to the raw score.
     strength: f64,
+    /// Observability sink — serde-skipped, restored to the noop
+    /// sink on round-trip.
+    #[cfg_attr(
+        feature = "serde",
+        serde(skip, default = "crate::metrics::default_sink")
+    )]
+    metrics: Arc<dyn MetricsSink>,
 }
 
 /// Single labelled record.
@@ -116,6 +126,7 @@ impl<const D: usize> FeedbackStore<D> {
             capacity: DEFAULT_CAPACITY,
             sigma: DEFAULT_KERNEL_SIGMA,
             strength: DEFAULT_STRENGTH,
+            metrics: default_sink(),
         }
     }
 
@@ -146,7 +157,22 @@ impl<const D: usize> FeedbackStore<D> {
             capacity,
             sigma,
             strength,
+            metrics: default_sink(),
         })
+    }
+
+    /// Install a metrics sink — every `label` call emits counters
+    /// keyed by verdict (benign vs confirmed).
+    #[must_use]
+    pub fn with_metrics_sink(mut self, sink: Arc<dyn MetricsSink>) -> Self {
+        self.metrics = sink;
+        self
+    }
+
+    /// Read-only handle to the installed sink.
+    #[must_use]
+    pub fn metrics_sink(&self) -> &Arc<dyn MetricsSink> {
+        &self.metrics
     }
 
     /// Labels currently stored.
@@ -194,6 +220,13 @@ impl<const D: usize> FeedbackStore<D> {
             self.entries.remove(0);
         }
         self.entries.push(LabelledPoint { point, label });
+        self.metrics
+            .inc_counter(names::FEEDBACK_LABELS_OBSERVED_TOTAL, 1);
+        let sub = match label {
+            FeedbackLabel::Benign => names::FEEDBACK_LABELS_BENIGN_TOTAL,
+            FeedbackLabel::Confirmed => names::FEEDBACK_LABELS_CONFIRMED_TOTAL,
+        };
+        self.metrics.inc_counter(sub, 1);
         Ok(())
     }
 

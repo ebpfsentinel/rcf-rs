@@ -280,6 +280,78 @@ pub mod names {
     /// [`crate::RandomCutForest::score_early_term`] call — use with
     /// [`FOREST_TREES`] to compute the latency savings distribution.
     pub const EARLY_TERM_TREES: &str = "rcf_early_term_trees";
+
+    // --- hot_path ------------------------------------------------
+
+    /// Counter: [`crate::UpdateSampler`] `accept_*` calls that
+    /// admitted the offer.
+    pub const HOT_PATH_SAMPLER_ACCEPTED_TOTAL: &str = "rcf_hot_path_sampler_accepted_total";
+    /// Counter: [`crate::UpdateSampler`] `accept_*` calls that
+    /// rejected the offer (stride / per-flow-hash residue mismatch).
+    pub const HOT_PATH_SAMPLER_REJECTED_TOTAL: &str = "rcf_hot_path_sampler_rejected_total";
+    /// Counter: points successfully enqueued through a
+    /// [`crate::UpdateProducer::try_enqueue`] call.
+    pub const HOT_PATH_QUEUE_ENQUEUED_TOTAL: &str = "rcf_hot_path_queue_enqueued_total";
+    /// Counter: points dropped because the hot-path MPSC queue was
+    /// full. Non-zero indicates classifier > updater throughput.
+    pub const HOT_PATH_QUEUE_DROPPED_TOTAL: &str = "rcf_hot_path_queue_dropped_total";
+    /// Counter: [`crate::PrefixRateCap::check_and_record`] calls that
+    /// admitted the offer.
+    pub const HOT_PATH_PREFIX_ADMITTED_TOTAL: &str = "rcf_hot_path_prefix_admitted_total";
+    /// Counter: [`crate::PrefixRateCap::check_and_record`] calls that
+    /// capped the offer (bucket at limit).
+    pub const HOT_PATH_PREFIX_CAPPED_TOTAL: &str = "rcf_hot_path_prefix_capped_total";
+
+    // --- drift_aware ---------------------------------------------
+
+    /// Counter: [`crate::DriftAwareForest`] shadow → primary swaps.
+    pub const DRIFT_AWARE_SWAPS_TOTAL: &str = "rcf_drift_aware_swaps_total";
+    /// Counter: [`crate::DriftAwareForest::on_drift`] calls that
+    /// actually spawned a shadow (not gated out by
+    /// `min_primary_age` or in-flight shadow).
+    pub const DRIFT_AWARE_ON_DRIFT_TOTAL: &str = "rcf_drift_aware_on_drift_total";
+    /// Gauge: `1.0` while a shadow is warming, `0.0` otherwise.
+    pub const DRIFT_AWARE_SHADOW_ACTIVE: &str = "rcf_drift_aware_shadow_active";
+
+    // --- adwin ---------------------------------------------------
+
+    /// Counter: finite values folded into an
+    /// [`crate::AdwinDetector::update`] window.
+    pub const ADWIN_OBSERVED_TOTAL: &str = "rcf_adwin_observed_total";
+    /// Counter: [`crate::AdwinDetector::update`] calls that
+    /// detected drift and shrank the window.
+    pub const ADWIN_DRIFT_FIRES_TOTAL: &str = "rcf_adwin_drift_fires_total";
+
+    // --- lsh_cluster ---------------------------------------------
+
+    /// Counter: every [`crate::LshAlertClusterer::observe`] call.
+    pub const LSH_ALERTS_OBSERVED_TOTAL: &str = "rcf_lsh_alerts_observed_total";
+    /// Counter: LSH alerts that opened a brand-new bucket.
+    pub const LSH_CLUSTERS_NEW_TOTAL: &str = "rcf_lsh_clusters_new_total";
+    /// Counter: LSH alerts merged into an existing bucket.
+    pub const LSH_CLUSTERS_JOINED_TOTAL: &str = "rcf_lsh_clusters_joined_total";
+    /// Gauge: distinct active LSH cluster hashes.
+    pub const LSH_CLUSTERS_ACTIVE: &str = "rcf_lsh_clusters_active";
+
+    // --- feedback ------------------------------------------------
+
+    /// Counter: every [`crate::FeedbackStore::label`] call that
+    /// accepted the point.
+    pub const FEEDBACK_LABELS_OBSERVED_TOTAL: &str = "rcf_feedback_labels_observed_total";
+    /// Counter: feedback labels of kind
+    /// [`crate::FeedbackLabel::Benign`].
+    pub const FEEDBACK_LABELS_BENIGN_TOTAL: &str = "rcf_feedback_labels_benign_total";
+    /// Counter: feedback labels of kind
+    /// [`crate::FeedbackLabel::Confirmed`].
+    pub const FEEDBACK_LABELS_CONFIRMED_TOTAL: &str = "rcf_feedback_labels_confirmed_total";
+
+    // --- univariate_spot -----------------------------------------
+
+    /// Counter: every finite value folded via
+    /// [`crate::PotDetector::record`].
+    pub const SPOT_OBSERVATIONS_TOTAL: &str = "rcf_spot_observations_total";
+    /// Counter: peaks accumulated above the SPOT/DSPOT threshold `u`.
+    pub const SPOT_PEAKS_TOTAL: &str = "rcf_spot_peaks_total";
 }
 
 #[cfg(test)]

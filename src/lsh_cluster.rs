@@ -20,10 +20,12 @@
 #![cfg(feature = "std")]
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::audit::AlertRecord;
 use crate::domain::DiVector;
 use crate::error::{RcfError, RcfResult};
+use crate::metrics::{MetricsSink, default_sink, names};
 
 /// Number of quantisation buckets per per-dim attribution value.
 /// 16 buckets → 4 bits per dim, packed into the hash string.
@@ -47,7 +49,7 @@ pub enum LshClusterDecision {
 /// Quantise-and-bucket alert clusterer. Thread-`Send` / `Sync`
 /// friendly — holds a `HashMap<String, u64>` counter keyed by the
 /// quantised hash.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct LshAlertClusterer {
     /// Per-hash count of alerts merged into the cluster.
     buckets: HashMap<String, u64>,
@@ -62,6 +64,22 @@ pub struct LshAlertClusterer {
     joined_total: u64,
     /// Lifetime cluster openings.
     new_cluster_total: u64,
+    /// Observability sink.
+    metrics: Arc<dyn MetricsSink>,
+}
+
+impl Default for LshAlertClusterer {
+    fn default() -> Self {
+        Self {
+            buckets: HashMap::new(),
+            buckets_per_dim: DEFAULT_BUCKETS_PER_DIM,
+            attr_cap: DEFAULT_ATTR_CAP,
+            observed_total: 0,
+            joined_total: 0,
+            new_cluster_total: 0,
+            metrics: default_sink(),
+        }
+    }
 }
 
 impl LshAlertClusterer {
@@ -90,7 +108,22 @@ impl LshAlertClusterer {
             observed_total: 0,
             joined_total: 0,
             new_cluster_total: 0,
+            metrics: default_sink(),
         })
+    }
+
+    /// Install a metrics sink — every `observe` call emits
+    /// observed/new/joined counters + an active-clusters gauge.
+    #[must_use]
+    pub fn with_metrics_sink(mut self, sink: Arc<dyn MetricsSink>) -> Self {
+        self.metrics = sink;
+        self
+    }
+
+    /// Read-only handle to the installed sink.
+    #[must_use]
+    pub fn metrics_sink(&self) -> &Arc<dyn MetricsSink> {
+        &self.metrics
     }
 
     /// Convenience constructor — [`DEFAULT_BUCKETS_PER_DIM`] /
@@ -116,16 +149,24 @@ impl LshAlertClusterer {
     {
         let hash = self.hash_divector(&record.attribution);
         self.observed_total = self.observed_total.saturating_add(1);
+        self.metrics
+            .inc_counter(names::LSH_ALERTS_OBSERVED_TOTAL, 1);
         let entry = self.buckets.entry(hash.clone()).or_insert(0);
         let is_new = *entry == 0;
         *entry = entry.saturating_add(1);
         let decision = if is_new {
             self.new_cluster_total = self.new_cluster_total.saturating_add(1);
+            self.metrics.inc_counter(names::LSH_CLUSTERS_NEW_TOTAL, 1);
             LshClusterDecision::NewCluster
         } else {
             self.joined_total = self.joined_total.saturating_add(1);
+            self.metrics
+                .inc_counter(names::LSH_CLUSTERS_JOINED_TOTAL, 1);
             LshClusterDecision::Joined
         };
+        #[allow(clippy::cast_precision_loss)]
+        self.metrics
+            .set_gauge(names::LSH_CLUSTERS_ACTIVE, self.buckets.len() as f64);
         (hash, decision)
     }
 
@@ -187,6 +228,7 @@ impl LshAlertClusterer {
     /// Drop every bucket; counters preserved.
     pub fn clear_buckets(&mut self) {
         self.buckets.clear();
+        self.metrics.set_gauge(names::LSH_CLUSTERS_ACTIVE, 0.0);
     }
 
     /// Map a signed attribution value to `[0, buckets_per_dim)`.

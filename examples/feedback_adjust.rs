@@ -22,12 +22,7 @@ fn main() {
     // Warm on a periodic-ish baseline.
     let mut t = 0.0_f64;
     for _ in 0..2_000 {
-        let p = [
-            t.sin(),
-            (t * 0.3).cos(),
-            (t * 0.7).sin(),
-            (t * 0.2).cos(),
-        ];
+        let p = [t.sin(), (t * 0.3).cos(), (t * 0.7).sin(), (t * 0.2).cos()];
         forest.update(p).unwrap();
         t += 0.1;
     }
@@ -43,9 +38,7 @@ fn main() {
 
     let raw_after: f64 = forest.score(&probe).unwrap().into();
     let adjusted_after = feedback.adjust(&probe, raw_after);
-    println!(
-        "raw score after feedback  = {raw_after:.3} (unchanged — forest untouched)"
-    );
+    println!("raw score after feedback  = {raw_after:.3} (unchanged — forest untouched)");
     println!(
         "adjusted score            = {adjusted_after:.3} (pulled toward baseline by Benign label)"
     );
@@ -56,16 +49,12 @@ fn main() {
     let nearby = [2.55_f64, 0.15, -1.85, 0.95];
     let raw_nearby: f64 = forest.score(&nearby).unwrap().into();
     let adj_nearby = feedback.adjust(&nearby, raw_nearby);
-    println!(
-        "nearby raw = {raw_nearby:.3}, adjusted = {adj_nearby:.3} (kernel-weighted leak)"
-    );
+    println!("nearby raw = {raw_nearby:.3}, adjusted = {adj_nearby:.3} (kernel-weighted leak)");
 
     // A probe far from the labelled point is not influenced —
     // feedback is local, not global.
     let far = [-3.0_f64, -3.0, -3.0, -3.0];
     let raw_far: f64 = forest.score(&far).unwrap().into();
     let adj_far = feedback.adjust(&far, raw_far);
-    println!(
-        "far    raw = {raw_far:.3}, adjusted = {adj_far:.3} (out of kernel range)"
-    );
+    println!("far    raw = {raw_far:.3}, adjusted = {adj_far:.3} (out of kernel range)");
 }

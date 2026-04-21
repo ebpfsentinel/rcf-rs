@@ -69,6 +69,8 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
+use crate::metrics::{MetricsSink, default_sink, names};
+
 /// Stride-based or per-flow-hash update sampler.
 ///
 /// Accepts `1 / keep_every_n` of the offered updates. The sampler
@@ -99,6 +101,9 @@ pub struct UpdateSampler {
     /// multiply by `mix_k1` alone (a structure the attacker could
     /// invert given enough observations).
     mix_k2: u64,
+    /// Observability sink — every `accept_*` call emits an
+    /// accepted/rejected counter. Defaults to [`crate::NoopSink`].
+    metrics: Arc<dyn MetricsSink>,
 }
 
 impl UpdateSampler {
@@ -121,6 +126,7 @@ impl UpdateSampler {
             rejected: AtomicU64::new(0),
             mix_k1: 0,
             mix_k2: 0,
+            metrics: default_sink(),
         }
     }
 
@@ -162,7 +168,22 @@ impl UpdateSampler {
             rejected: AtomicU64::new(0),
             mix_k1,
             mix_k2,
+            metrics: default_sink(),
         })
+    }
+
+    /// Install a metrics sink — every `accept_*` call emits an
+    /// accepted/rejected counter through it. Chain-style builder.
+    #[must_use]
+    pub fn with_metrics_sink(mut self, sink: Arc<dyn MetricsSink>) -> Self {
+        self.metrics = sink;
+        self
+    }
+
+    /// Read-only handle to the installed sink.
+    #[must_use]
+    pub fn metrics_sink(&self) -> &Arc<dyn MetricsSink> {
+        &self.metrics
     }
 
     /// Whether this sampler was built with a keyed mix.
@@ -183,6 +204,8 @@ impl UpdateSampler {
     pub fn accept_stride(&self) -> bool {
         if self.keep_every_n <= 1 {
             self.accepted.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .inc_counter(names::HOT_PATH_SAMPLER_ACCEPTED_TOTAL, 1);
             return true;
         }
         let n = self.counter.fetch_add(1, Ordering::Relaxed);
@@ -190,8 +213,12 @@ impl UpdateSampler {
         let ok = n.is_multiple_of(keep);
         if ok {
             self.accepted.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .inc_counter(names::HOT_PATH_SAMPLER_ACCEPTED_TOTAL, 1);
         } else {
             self.rejected.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .inc_counter(names::HOT_PATH_SAMPLER_REJECTED_TOTAL, 1);
         }
         ok
     }
@@ -216,14 +243,20 @@ impl UpdateSampler {
     pub fn accept_hash(&self, flow_hash: u64) -> bool {
         if self.keep_every_n <= 1 {
             self.accepted.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .inc_counter(names::HOT_PATH_SAMPLER_ACCEPTED_TOTAL, 1);
             return true;
         }
         let mixed = self.keyed_mix(flow_hash);
         let ok = mixed.is_multiple_of(u64::from(self.keep_every_n));
         if ok {
             self.accepted.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .inc_counter(names::HOT_PATH_SAMPLER_ACCEPTED_TOTAL, 1);
         } else {
             self.rejected.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .inc_counter(names::HOT_PATH_SAMPLER_REJECTED_TOTAL, 1);
         }
         ok
     }
@@ -272,6 +305,10 @@ pub struct UpdateProducer<const D: usize> {
     enqueued: Arc<AtomicU64>,
     /// Lifetime dropped-on-full count.
     dropped: Arc<AtomicU64>,
+    /// Observability sink — shared with every clone of this
+    /// producer so every classifier thread emits to the same
+    /// endpoint.
+    metrics: Arc<dyn MetricsSink>,
 }
 
 impl<const D: usize> Clone for UpdateProducer<D> {
@@ -281,6 +318,7 @@ impl<const D: usize> Clone for UpdateProducer<D> {
             capacity: self.capacity,
             enqueued: Arc::clone(&self.enqueued),
             dropped: Arc::clone(&self.dropped),
+            metrics: Arc::clone(&self.metrics),
         }
     }
 }
@@ -293,11 +331,21 @@ impl<const D: usize> UpdateProducer<D> {
     pub fn try_enqueue(&self, point: [f64; D]) -> bool {
         if self.tx.try_send(point).is_ok() {
             self.enqueued.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .inc_counter(names::HOT_PATH_QUEUE_ENQUEUED_TOTAL, 1);
             true
         } else {
             self.dropped.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .inc_counter(names::HOT_PATH_QUEUE_DROPPED_TOTAL, 1);
             false
         }
+    }
+
+    /// Read-only handle to the installed sink.
+    #[must_use]
+    pub fn metrics_sink(&self) -> &Arc<dyn MetricsSink> {
+        &self.metrics
     }
 
     /// Channel capacity as configured at [`channel`].
@@ -372,6 +420,16 @@ impl<const D: usize> UpdateConsumer<D> {
 /// signal the channel needs widening.
 #[must_use]
 pub fn channel<const D: usize>(capacity: usize) -> (UpdateProducer<D>, UpdateConsumer<D>) {
+    channel_with_sink(capacity, default_sink())
+}
+
+/// Same as [`channel`] but with a caller-supplied metrics sink.
+/// Every clone of the returned producer shares the same sink.
+#[must_use]
+pub fn channel_with_sink<const D: usize>(
+    capacity: usize,
+    sink: Arc<dyn MetricsSink>,
+) -> (UpdateProducer<D>, UpdateConsumer<D>) {
     let (tx, rx) = sync_channel::<[f64; D]>(capacity);
     let enqueued = Arc::new(AtomicU64::new(0));
     let dropped = Arc::new(AtomicU64::new(0));
@@ -381,6 +439,7 @@ pub fn channel<const D: usize>(capacity: usize) -> (UpdateProducer<D>, UpdateCon
             capacity,
             enqueued,
             dropped,
+            metrics: sink,
         },
         UpdateConsumer { rx },
     )
@@ -428,6 +487,8 @@ pub struct PrefixRateCap {
     capped_total: AtomicU64,
     /// Lifetime count of admits passed through.
     admitted_total: AtomicU64,
+    /// Observability sink.
+    metrics: Arc<dyn MetricsSink>,
 }
 
 impl PrefixRateCap {
@@ -456,7 +517,22 @@ impl PrefixRateCap {
             cap_per_window,
             capped_total: AtomicU64::new(0),
             admitted_total: AtomicU64::new(0),
+            metrics: default_sink(),
         }
+    }
+
+    /// Install a metrics sink — every `check_and_record` call emits
+    /// an admitted/capped counter through it.
+    #[must_use]
+    pub fn with_metrics_sink(mut self, sink: Arc<dyn MetricsSink>) -> Self {
+        self.metrics = sink;
+        self
+    }
+
+    /// Read-only handle to the installed sink.
+    #[must_use]
+    pub fn metrics_sink(&self) -> &Arc<dyn MetricsSink> {
+        &self.metrics
     }
 
     /// Record an admission attempt and return `true` when the
@@ -464,6 +540,8 @@ impl PrefixRateCap {
     pub fn check_and_record(&self, prefix_hash: u64, now_ms: u64) -> bool {
         if self.cap_per_window == 0 {
             self.admitted_total.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .inc_counter(names::HOT_PATH_PREFIX_ADMITTED_TOTAL, 1);
             return true;
         }
         // Atomically roll the window if needed.
@@ -491,6 +569,8 @@ impl PrefixRateCap {
         let prior = self.buckets[idx].fetch_add(1, Ordering::Relaxed);
         if prior < self.cap_per_window {
             self.admitted_total.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .inc_counter(names::HOT_PATH_PREFIX_ADMITTED_TOTAL, 1);
             true
         } else {
             // Already over — roll back the increment so a late
@@ -498,6 +578,8 @@ impl PrefixRateCap {
             // bucket.
             self.buckets[idx].fetch_sub(1, Ordering::Relaxed);
             self.capped_total.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .inc_counter(names::HOT_PATH_PREFIX_CAPPED_TOTAL, 1);
             false
         }
     }

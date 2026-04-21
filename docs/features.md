@@ -640,6 +640,29 @@ Canonical metric names (`metrics::names::*`):
 | histogram | `rcf_drift_s_high` | CUSUM upward accumulator |
 | histogram | `rcf_drift_s_low` | CUSUM downward accumulator |
 | histogram | `rcf_early_term_trees` | trees walked per `score_early_term` |
+| counter | `rcf_hot_path_sampler_accepted_total` | `UpdateSampler::accept_*` admitted |
+| counter | `rcf_hot_path_sampler_rejected_total` | `UpdateSampler::accept_*` rejected |
+| counter | `rcf_hot_path_queue_enqueued_total` | `UpdateProducer::try_enqueue` landed |
+| counter | `rcf_hot_path_queue_dropped_total` | `UpdateProducer::try_enqueue` dropped on full |
+| counter | `rcf_hot_path_prefix_admitted_total` | `PrefixRateCap::check_and_record` admitted |
+| counter | `rcf_hot_path_prefix_capped_total` | `PrefixRateCap::check_and_record` capped |
+| counter | `rcf_drift_aware_swaps_total` | `DriftAwareForest` shadow → primary swap |
+| counter | `rcf_drift_aware_on_drift_total` | `DriftAwareForest::on_drift` actually spawned a shadow |
+| gauge | `rcf_drift_aware_shadow_active` | 1.0 while shadow warming, 0.0 otherwise |
+| counter | `rcf_adwin_observed_total` | `AdwinDetector::update` folded a finite value |
+| counter | `rcf_adwin_drift_fires_total` | `AdwinDetector::update` detected drift |
+| counter | `rcf_lsh_alerts_observed_total` | `LshAlertClusterer::observe` call |
+| counter | `rcf_lsh_clusters_new_total` | LSH alert opened a new bucket |
+| counter | `rcf_lsh_clusters_joined_total` | LSH alert merged into existing bucket |
+| gauge | `rcf_lsh_clusters_active` | distinct active LSH cluster hashes |
+| counter | `rcf_feedback_labels_observed_total` | `FeedbackStore::label` accepted |
+| counter | `rcf_feedback_labels_benign_total` | label verdict `Benign` |
+| counter | `rcf_feedback_labels_confirmed_total` | label verdict `Confirmed` |
+| counter | `rcf_spot_observations_total` | `PotDetector::record` folded a finite value |
+| counter | `rcf_spot_peaks_total` | value above the SPOT/DSPOT threshold `u` |
+
+Every detector exposing these ships a `.with_metrics_sink(Arc<dyn
+MetricsSink>)` chain-style builder; default is `NoopSink`.
 
 Source: `src/metrics.rs`.
 

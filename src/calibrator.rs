@@ -361,12 +361,7 @@ impl PlattCalibrator {
     ///
     /// Returns [`RcfError::InvalidConfig`] on non-positive / non-
     /// finite `lr`.
-    pub fn update_online(
-        &mut self,
-        score: f64,
-        label: bool,
-        lr: f64,
-    ) -> RcfResult<()> {
+    pub fn update_online(&mut self, score: f64, label: bool, lr: f64) -> RcfResult<()> {
         if !lr.is_finite() || lr <= 0.0 {
             return Err(RcfError::InvalidConfig(format!(
                 "PlattCalibrator::update_online: lr must be finite and > 0, got {lr}"

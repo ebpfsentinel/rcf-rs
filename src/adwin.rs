@@ -40,7 +40,10 @@
 
 #![cfg(feature = "std")]
 
+use std::sync::Arc;
+
 use crate::error::{RcfError, RcfResult};
+use crate::metrics::{MetricsSink, default_sink, names};
 
 /// Default confidence budget `δ` — lower values = stricter bound,
 /// fewer false-positive drift fires. `0.002` matches Bifet's
@@ -71,6 +74,13 @@ pub struct AdwinDetector {
     buffer: Vec<f64>,
     /// Cumulative drift fires reported.
     drift_fires: u64,
+    /// Observability sink — serde-skipped, restored to the noop
+    /// sink on round-trip.
+    #[cfg_attr(
+        feature = "serde",
+        serde(skip, default = "crate::metrics::default_sink")
+    )]
+    metrics: Arc<dyn MetricsSink>,
 }
 
 impl AdwinDetector {
@@ -104,7 +114,22 @@ impl AdwinDetector {
             window_cap,
             buffer: Vec::with_capacity(window_cap),
             drift_fires: 0,
+            metrics: default_sink(),
         })
+    }
+
+    /// Install a metrics sink — every `update` emits an observed
+    /// counter, and every drift fire bumps a drift-fires counter.
+    #[must_use]
+    pub fn with_metrics_sink(mut self, sink: Arc<dyn MetricsSink>) -> Self {
+        self.metrics = sink;
+        self
+    }
+
+    /// Read-only handle to the installed sink.
+    #[must_use]
+    pub fn metrics_sink(&self) -> &Arc<dyn MetricsSink> {
+        &self.metrics
     }
 
     /// Convenience: range `1.0`, [`DEFAULT_DELTA`],
@@ -157,6 +182,7 @@ impl AdwinDetector {
         if !value.is_finite() {
             return false;
         }
+        self.metrics.inc_counter(names::ADWIN_OBSERVED_TOTAL, 1);
         // Drop the oldest entry if we're at cap. Keeping this an
         // `O(N)` front-removal is fine at N ≤ 4k — benchmarked
         // marginal vs `VecDeque` in the typical rcf-rs use case.
@@ -164,7 +190,11 @@ impl AdwinDetector {
             self.buffer.remove(0);
         }
         self.buffer.push(value);
-        self.detect_and_shrink()
+        let fired = self.detect_and_shrink();
+        if fired {
+            self.metrics.inc_counter(names::ADWIN_DRIFT_FIRES_TOTAL, 1);
+        }
+        fired
     }
 
     /// Drop every observation. Counters are preserved.

@@ -120,11 +120,11 @@ pub mod drift_aware;
 pub mod dynamic_forest;
 pub mod early_term;
 #[cfg(feature = "std")]
-pub mod feedback;
-#[cfg(feature = "std")]
 pub mod ensemble;
 pub mod error;
 pub mod feature_drift;
+#[cfg(feature = "std")]
+pub mod feedback;
 pub mod forensic;
 pub mod forest;
 pub mod group_score;
@@ -155,6 +155,10 @@ pub mod tree;
 pub mod univariate_spot;
 pub mod visitor;
 
+#[cfg(feature = "std")]
+pub use adwin::{
+    AdwinDetector, DEFAULT_DELTA as ADWIN_DEFAULT_DELTA, DEFAULT_WINDOW_CAP as ADWIN_DEFAULT_WINDOW,
+};
 pub use alert_cluster::{AlertCluster, AlertClusterer, ClusterDecision};
 pub use attribution_stability::AttributionStability;
 pub use audit::{ALERT_RECORD_VERSION, AlertContext, AlertRecord};
@@ -162,25 +166,20 @@ pub use bootstrap::BootstrapReport;
 pub use calibrator::{PlattCalibrator, PlattFitConfig};
 pub use config::{ForestBuilder, RcfConfig};
 pub use domain::{AnomalyScore, BoundingBox, Cut, DiVector, Point};
-pub use early_term::{EarlyTermConfig, EarlyTermScore};
-#[cfg(feature = "std")]
-pub use adwin::{
-    AdwinDetector, DEFAULT_DELTA as ADWIN_DEFAULT_DELTA, DEFAULT_WINDOW_CAP as ADWIN_DEFAULT_WINDOW,
-};
 #[cfg(feature = "std")]
 pub use drift_aware::{DriftAwareForest, DriftRecoveryConfig};
 #[cfg(feature = "std")]
 pub use dynamic_forest::DynamicForest;
-#[cfg(feature = "std")]
-pub use feedback::{
-    DEFAULT_CAPACITY as FEEDBACK_DEFAULT_CAPACITY,
-    DEFAULT_KERNEL_SIGMA as FEEDBACK_DEFAULT_SIGMA,
-    DEFAULT_STRENGTH as FEEDBACK_DEFAULT_STRENGTH, FeedbackLabel, FeedbackStore,
-};
+pub use early_term::{EarlyTermConfig, EarlyTermScore};
 #[cfg(feature = "std")]
 pub use ensemble::{chi_squared_survival_even, fisher_combine};
 pub use error::{RcfError, RcfResult};
 pub use feature_drift::{DriftLevel, FeatureDriftDetector};
+#[cfg(feature = "std")]
+pub use feedback::{
+    DEFAULT_CAPACITY as FEEDBACK_DEFAULT_CAPACITY, DEFAULT_KERNEL_SIGMA as FEEDBACK_DEFAULT_SIGMA,
+    DEFAULT_STRENGTH as FEEDBACK_DEFAULT_STRENGTH, FeedbackLabel, FeedbackStore,
+};
 pub use forensic::ForensicBaseline;
 pub use forest::{PointStore, RandomCutForest};
 pub use group_score::{FeatureGroup, FeatureGroups, FeatureGroupsBuilder, GroupScores};

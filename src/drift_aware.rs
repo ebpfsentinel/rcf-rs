@@ -34,10 +34,13 @@
 
 #![cfg(feature = "std")]
 
+use std::sync::Arc;
+
 use crate::config::ForestBuilder;
 use crate::domain::{AnomalyScore, DiVector};
 use crate::error::RcfResult;
 use crate::forest::RandomCutForest;
+use crate::metrics::{MetricsSink, default_sink, names};
 
 /// Policy parameters for the shadow swap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +96,8 @@ pub struct DriftAwareForest<const D: usize> {
     config: DriftRecoveryConfig,
     /// Lifetime count of completed shadow swaps — observability.
     swaps: u64,
+    /// Observability sink.
+    metrics: Arc<dyn MetricsSink>,
 }
 
 impl<const D: usize> DriftAwareForest<D> {
@@ -112,7 +117,22 @@ impl<const D: usize> DriftAwareForest<D> {
             builder,
             config,
             swaps: 0,
+            metrics: default_sink(),
         })
+    }
+
+    /// Install a metrics sink — `on_drift` / swap emit counters,
+    /// shadow activity emits a gauge.
+    #[must_use]
+    pub fn with_metrics_sink(mut self, sink: Arc<dyn MetricsSink>) -> Self {
+        self.metrics = sink;
+        self
+    }
+
+    /// Read-only handle to the installed sink.
+    #[must_use]
+    pub fn metrics_sink(&self) -> &Arc<dyn MetricsSink> {
+        &self.metrics
     }
 
     /// Read-only access to the live primary forest.
@@ -175,6 +195,8 @@ impl<const D: usize> DriftAwareForest<D> {
                     // Drop the shadow — primary path must stay
                     // clean. The caller can re-arm via on_drift.
                     self.shadow = None;
+                    self.metrics
+                        .set_gauge(names::DRIFT_AWARE_SHADOW_ACTIVE, 0.0);
                     return Err(e);
                 }
             }
@@ -228,6 +250,10 @@ impl<const D: usize> DriftAwareForest<D> {
             forest: fresh,
             seen: 0,
         });
+        self.metrics
+            .inc_counter(names::DRIFT_AWARE_ON_DRIFT_TOTAL, 1);
+        self.metrics
+            .set_gauge(names::DRIFT_AWARE_SHADOW_ACTIVE, 1.0);
         Ok(true)
     }
 
@@ -236,6 +262,8 @@ impl<const D: usize> DriftAwareForest<D> {
     /// to abort recovery.
     pub fn abort_shadow(&mut self) {
         self.shadow = None;
+        self.metrics
+            .set_gauge(names::DRIFT_AWARE_SHADOW_ACTIVE, 0.0);
     }
 
     /// Promote shadow → primary. Callers never invoke this
@@ -246,6 +274,9 @@ impl<const D: usize> DriftAwareForest<D> {
             self.primary = shadow.forest;
             self.primary_age = shadow.seen;
             self.swaps = self.swaps.saturating_add(1);
+            self.metrics.inc_counter(names::DRIFT_AWARE_SWAPS_TOTAL, 1);
+            self.metrics
+                .set_gauge(names::DRIFT_AWARE_SHADOW_ACTIVE, 0.0);
         }
     }
 }

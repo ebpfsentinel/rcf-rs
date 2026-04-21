@@ -39,7 +39,10 @@
 
 #![cfg(feature = "std")]
 
+use std::sync::Arc;
+
 use crate::error::{RcfError, RcfResult};
+use crate::metrics::{MetricsSink, default_sink, names};
 use crate::tdigest::{DEFAULT_COMPRESSION, TDigest};
 
 /// Default quantile threshold above which observations are treated
@@ -78,6 +81,13 @@ pub struct PotDetector {
     q: f64,
     /// Lifetime count of `record` calls.
     total_seen: u64,
+    /// Observability sink — serde-skipped, restored to the noop
+    /// sink on round-trip.
+    #[cfg_attr(
+        feature = "serde",
+        serde(skip, default = "crate::metrics::default_sink")
+    )]
+    metrics: Arc<dyn MetricsSink>,
 }
 
 impl PotDetector {
@@ -103,6 +113,7 @@ impl PotDetector {
             frozen_u: None,
             q,
             total_seen: 0,
+            metrics: default_sink(),
         })
     }
 
@@ -118,7 +129,22 @@ impl PotDetector {
             frozen_u: None,
             q: DEFAULT_QUANTILE,
             total_seen: 0,
+            metrics: default_sink(),
         }
+    }
+
+    /// Install a metrics sink — every `record` emits an
+    /// observations counter, every peak bumps a peaks counter.
+    #[must_use]
+    pub fn with_metrics_sink(mut self, sink: Arc<dyn MetricsSink>) -> Self {
+        self.metrics = sink;
+        self
+    }
+
+    /// Read-only handle to the installed sink.
+    #[must_use]
+    pub fn metrics_sink(&self) -> &Arc<dyn MetricsSink> {
+        &self.metrics
     }
 
     /// Target quantile.
@@ -157,12 +183,14 @@ impl PotDetector {
             return;
         }
         self.total_seen = self.total_seen.saturating_add(1);
+        self.metrics.inc_counter(names::SPOT_OBSERVATIONS_TOTAL, 1);
         self.digest.record(value);
         if let Some(u) = self.current_u() {
             let excess = value - u;
             if excess > 0.0 {
                 // Welford update on the peak excess stream.
                 self.peak_count = self.peak_count.saturating_add(1);
+                self.metrics.inc_counter(names::SPOT_PEAKS_TOTAL, 1);
                 #[allow(clippy::cast_precision_loss)]
                 let n = self.peak_count as f64;
                 let delta = excess - self.peak_mean;
