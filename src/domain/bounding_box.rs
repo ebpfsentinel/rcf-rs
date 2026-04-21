@@ -354,6 +354,11 @@ impl<const D: usize> BoundingBox<D> {
     /// Total cut probability without allocating the per-dim
     /// breakdown — fast path for [`crate::ScalarScoreVisitor`].
     ///
+    /// Fuses the `range_sum` and extension passes into a single SIMD
+    /// loop so `self.min` / `self.max` are loaded once per chunk. The
+    /// previous split implementation did two passes and ate 2× the L1
+    /// bandwidth on deep tree descents where bbox reload dominates.
+    ///
     /// # Errors
     ///
     /// Returns [`RcfError::DimensionMismatch`] when `point.len() != D`.
@@ -364,10 +369,10 @@ impl<const D: usize> BoundingBox<D> {
                 got: point.len(),
             });
         }
-        let range_sum = self.range_sum();
         let chunks = D / 4;
         let zero = f64x4::splat(0.0);
-        let mut acc_simd = f64x4::splat(0.0);
+        let mut range_acc = f64x4::splat(0.0);
+        let mut ext_acc = f64x4::splat(0.0);
         for i in 0..chunks {
             let off = i * 4;
             let p = f64x4::from([point[off], point[off + 1], point[off + 2], point[off + 3]]);
@@ -383,17 +388,20 @@ impl<const D: usize> BoundingBox<D> {
                 self.max[off + 2],
                 self.max[off + 3],
             ]);
+            range_acc += mx - mn;
             let above = (p - mx).fast_max(zero);
             let below = (mn - p).fast_max(zero);
-            acc_simd += above + below;
+            ext_acc += above + below;
         }
-        let mut extension_sum = acc_simd.reduce_add();
+        let mut range_sum = range_acc.reduce_add();
+        let mut extension_sum = ext_acc.reduce_add();
         let tail_start = chunks * 4;
         for ((&p, &mn), &mx) in point[tail_start..D]
             .iter()
             .zip(self.min[tail_start..D].iter())
             .zip(self.max[tail_start..D].iter())
         {
+            range_sum += mx - mn;
             let above = p - mx;
             let below = mn - p;
             if above > 0.0 {
