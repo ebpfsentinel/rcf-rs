@@ -37,19 +37,18 @@ portable signal.
 
 ## Core ops
 
-`(trees=100, sample=256, D=16)` single-seed on the current
-thermal state (warm CPU — absolute numbers drift across sessions
-as documented in Caveats):
+`(trees=100, sample=256, D=16)` on a cool-CPU single-seed run
+(powersave governor, no competing load):
 
-| Workload                              | Time    | Throughput |
-| ------------------------------------- | ------- | ---------- |
-| `forest_update`                       | ~52 µs  | ~19 k/s    |
-| `forest_score`                        | ~61 µs  | ~16 k/s    |
-| `forest_attribution`                  | ~92 µs  | ~11 k/s    |
-| `forest_score_and_attribution`        | ~83 µs  | ~12 k/s    |
-| `forest_split_score_then_attribution` | ~160 µs | ~6 k/s     |
+| Workload                              | Time   | Throughput |
+| ------------------------------------- | ------ | ---------- |
+| `forest_update`                       | ~25 µs | ~40 k/s    |
+| `forest_score`                        | ~24 µs | ~42 k/s    |
+| `forest_attribution`                  | ~45 µs | ~22 k/s    |
+| `forest_score_and_attribution`        | ~46 µs | ~22 k/s    |
+| `forest_split_score_then_attribution` | ~76 µs | ~13 k/s    |
 
-The fused `score_and_attribution` walk is **~48 % faster** than
+The fused `score_and_attribution` walk is **~40 % faster** than
 calling `score` + `attribution` back-to-back (single traversal
 instead of two). The fused bbox SIMD kernel
 (`total_probability_of_cut`) saves one pass over `min`/`max` loads
@@ -60,11 +59,11 @@ Other `(trees, samples, D)` tuples below:
 
 | Config           | `forest_update` | `forest_score` | `forest_attribution` |
 | ---------------- | --------------- | -------------- | -------------------- |
-| `(50, 128, 16)`  | ~49 µs          | ~45 µs         | —                    |
-| `(100, 256, 4)`  | ~42 µs          | ~56 µs         | ~63 µs               |
-| `(100, 256, 16)` | ~52 µs          | ~61 µs         | ~92 µs               |
-| `(100, 256, 64)` | ~138 µs         | ~110 µs        | ~162 µs              |
-| `(200, 512, 16)` | ~85 µs          | ~82 µs         | —                    |
+| `(50, 128, 16)`  | ~20 µs          | ~18 µs         | —                    |
+| `(100, 256, 4)`  | ~20 µs          | ~21 µs         | ~36 µs               |
+| `(100, 256, 16)` | ~25 µs          | ~24 µs         | ~45 µs               |
+| `(100, 256, 64)` | ~66 µs          | ~28 µs         | ~91 µs               |
+| `(200, 512, 16)` | ~34 µs          | ~51 µs         | —                    |
 
 Criterion HTML report lives at `target/criterion/`.
 
@@ -74,9 +73,9 @@ Criterion HTML report lives at `target/criterion/`.
 
 | Batch size | `score_many` (parallel) | Serial loop | Speedup |
 | ---------- | ----------------------- | ----------- | ------- |
-| 64         | 1.04 ms                 | 3.68 ms     | 3.5×    |
-| 512        | 6.28 ms                 | 52.1 ms     | 8.3×    |
-| 4096       | 44.2 ms                 | 277.9 ms    | 6.3×    |
+| 64         | 511 µs                  | 2.16 ms     | 4.2×    |
+| 512        | 3.74 ms                 | 16.9 ms     | 4.5×    |
+| 4096       | 27.8 ms                 | 135 ms      | 4.9×    |
 
 ### Codisp batched scoring
 
@@ -86,8 +85,8 @@ root descent, rayon across trees:
 
 | Batch K | `score_codisp_many` | `score_codisp` loop | Speedup |
 | ------- | ------------------- | ------------------- | ------- |
-| 16      | 2.92 ms             | 3.94 ms             | 1.3×    |
-| 64      | 10.9 ms             | 16.4 ms             | 1.5×    |
+| 16      | 1.78 ms             | 2.36 ms             | 1.3×    |
+| 64      | 6.65 ms             | 9.48 ms             | 1.4×    |
 
 Gain caps at ~1.5× because insert/delete mutation phases still
 scale with `K × num_trees`; only the walk phase benefits from
@@ -109,7 +108,7 @@ threads contend rather than scale. Two avenues have been explored:
   Sorting probes by leading-dim quantised key groups similar tree
   descents so each rayon worker re-uses warm arena cache lines.
   At `k = 1024`, `D = 16`, correlated cluster: plain `score_many`
-  7.19 ms, sorted variant 8.25 ms — the `O(N log N)` sort + double
+  5.10 ms, sorted variant 5.69 ms — the `O(N log N)` sort + double
   gather outweighs the cache gain on uniformly-random batches.
   Callers with strongly-correlated batches (SOC alert replay of a
   single flow, periodic tenant-scan) can bench their own workload
@@ -131,12 +130,12 @@ threads contend rather than scale. Two avenues have been explored:
 
 | Path                                                       | Time   |
 | ---------------------------------------------------------- | ------ |
-| `score` (parallel ensemble)                                | 56 µs  |
-| `score_early_term` threshold=0.02 (tight)                  | 74 µs  |
-| `score_early_term` threshold=0.20 (loose, stops ~20 trees) | 9.8 µs |
+| `score` (parallel ensemble)                                | 32 µs  |
+| `score_early_term` threshold=0.02 (tight)                  | 32 µs  |
+| `score_early_term` threshold=0.20 (loose, stops ~20 trees) | 4.7 µs |
 
-Loose threshold → 5.7× speedup on baseline-dominated traffic;
-tight threshold loses to parallel `score` (sequential walk
+Loose threshold → 6.9× speedup on baseline-dominated traffic;
+tight threshold matches parallel `score` (sequential walk
 rarely short-circuits).
 
 ## Forensic baseline
@@ -145,13 +144,14 @@ rarely short-circuits).
 
 | `(trees, samples, D)` | Time  |
 | --------------------- | ----- |
-| `(100, 256, 4)`       | 16 µs |
-| `(100, 256, 16)`      | 35 µs |
-| `(100, 1024, 16)`     | 79 µs |
+| `(100, 256, 4)`       | 13 µs |
+| `(100, 256, 16)`      | 16 µs |
+| `(100, 1024, 16)`     | 64 µs |
 
 Cost ≈ `O(live_points × D)` Welford sweep — `sample_size` ×4
-→ ×4 time (actually ×2.3 on the current run — rayon fan-out
-hides some of the scaling), dim cost grows ~2× over 4 → 16.
+→ ×4 time (close to linear on the current run), dim cost
+grows ~1.3× over 4 → 16 (rayon hides per-dim cost until L1
+pressure sets in).
 
 ## Tenant pool at scale
 
@@ -159,17 +159,16 @@ hides some of the scaling), dim cost grows ~2× over 4 → 16.
 
 | N   | `similarity_matrix` | `score_across_tenants` | `most_similar_top5` |
 | --- | ------------------- | ---------------------- | ------------------- |
-| 32  | 56 µs               | 204 µs                 | 0.37 µs             |
-| 128 | 165 µs              | 787 µs                 | 1.25 µs             |
-| 512 | 956 µs              | 4.27 ms                | —                   |
+| 32  | 28 µs               | 85 µs                  | 0.33 µs             |
+| 128 | 72 µs               | 311 µs                 | 1.10 µs             |
+| 512 | 550 µs              | 2.67 ms                | 4.59 µs             |
 
 Scaling `N=32→512` (16× tenants):
 
-- `similarity_matrix` O(N²) parallelised: 17× (rayon fan-out
+- `similarity_matrix` O(N²) parallelised: 20× (rayon fan-out
   hides quadratic until core saturation).
-- `score_across_tenants` O(N) parallelised: 21×.
-- `most_similar_top5` O(N·log k) bounded heap at `N=128`: 3.4×
-  vs `N=32`.
+- `score_across_tenants` O(N) parallelised: 31×.
+- `most_similar_top5` O(N·log k) bounded heap: 14×.
 
 ## External baselines (synthetic)
 
@@ -181,8 +180,8 @@ mean ± stddev, coefficient of variation in parens.
 
 | Impl                                   | Backend              | Updates/s                   | Scores/s                  | AUC       |
 | -------------------------------------- | -------------------- | --------------------------- | ------------------------- | --------- |
-| `rcf-rs` 0.0.0-dev, `score()`          | Rust, rayon-parallel | **13 700** (single seed)    | **140 400** (single seed) | 1.000     |
-| `rcf-rs` 0.0.0-dev, `score_codisp()`   | Rust, parallel walk  | — (per-probe insert/delete) | 5 540 (single seed)       | 1.000     |
+| `rcf-rs` 0.0.0-dev, `score()`          | Rust, rayon-parallel | **31 500** (single seed)    | **197 900** (single seed) | 1.000     |
+| `rcf-rs` 0.0.0-dev, `score_codisp()`   | Rust, parallel walk  | — (per-probe insert/delete) | 8 150 (single seed)       | 1.000     |
 | `rcf-rs` 0.0.0-dev, `score()` (5-seed) | Rust, rayon-parallel | 17 500 ± 1 240 (7 %)        | 125 900 ± 1 840 (1.5 %)   | 1.000 ± 0 |
 | `randomcutforest-java` 4.4.0           | JVM 26, cold         | 2 090 ± 134 (6 %)           | 8 870 ± 415 (5 %)         | 1.000 ± 0 |
 | `rrcf` 0.4.4                           | Python + NumPy       | 73 ± 3 (4 %)                | 94 150 ± 4 840 (5 %)      | 0.992 ± 0 |
@@ -199,10 +198,11 @@ Ratios (mean/mean):
   AWS Java trails by ~14×.
 - **Scores (codisp path)**: rcf-rs `score_codisp()` mutates the
   forest per probe (insert → walk leaf→root → delete). Post the
-  rayon-per-tree parallel refactor it hits ~5.5 k probes/s at
-  `(100, 256, D=16)` — ~25× slower than the isolation-depth
-  `score()` fast path. Matches AWS Java `getAnomalyScore` / rrcf
-  `codisp()` semantic; use it for SOC triage / forensic replay,
+  rayon-per-tree parallel refactor (walk + delete now fan out
+  across trees) it hits ~8 k probes/s at `(100, 256, D=16)` —
+  ~25× slower than the isolation-depth `score()` fast path.
+  Matches AWS Java `getAnomalyScore` / rrcf `codisp()` semantic;
+  use it for SOC triage / forensic replay,
   not the eBPF hot path.
 - **AUC**: identical within measurement precision across every
   seed (0.992 for rrcf, 1.000 for the other three).
