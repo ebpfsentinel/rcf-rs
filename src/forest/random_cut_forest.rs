@@ -759,32 +759,18 @@ impl<const D: usize> RandomCutForest<D> {
         self.ensure_finite_metered(point)?;
         let idx = self.update_indexed(*point)?;
 
-        let mut total = 0.0_f64;
-        let mut count = 0_usize;
-        let mut walk_err: Option<RcfError> = None;
-        for (tree, _, _) in &self.trees {
-            let Some(leaf) = tree.leaf_of(idx) else {
-                continue;
-            };
-            match walk_codisp(tree.store(), leaf) {
-                Ok(c) => {
-                    total += c;
-                    count = count.saturating_add(1);
-                }
-                Err(e) => {
-                    walk_err = Some(e);
-                    break;
-                }
-            }
-        }
+        // Per-tree walks are read-only on the tree store once the
+        // probe has been inserted. The only mutation is the outer
+        // insert/delete around the loop — already serial. Under
+        // `parallel` the walks fan out across trees via rayon;
+        // per-tree order is irrelevant to the final mean.
+        let walk_result = codisp_walk_all_trees(&self.trees, idx);
 
         // Always delete the probe — even on walk error — to keep
         // the forest clean.
         let _ = self.delete(idx);
 
-        if let Some(e) = walk_err {
-            return Err(e);
-        }
+        let (total, count) = walk_result?;
         if count == 0 {
             return Err(RcfError::EmptyForest);
         }
@@ -893,7 +879,6 @@ impl<const D: usize> RandomCutForest<D> {
         &mut self,
         points: &[[f64; D]],
     ) -> RcfResult<Vec<AnomalyScore>> {
-        use std::collections::HashMap;
         if points.is_empty() {
             return Ok(Vec::new());
         }
@@ -921,34 +906,18 @@ impl<const D: usize> RandomCutForest<D> {
         }
 
         let n = points.len();
-        let mut totals = vec![0.0_f64; n];
-        let mut counts = vec![0_usize; n];
-        let mut walk_err: Option<RcfError> = None;
-
-        'trees: for (tree, _, _) in &self.trees {
-            let mut leaf_cache: HashMap<crate::tree::NodeRef, f64> = HashMap::new();
-            for (i, &idx) in probe_indices.iter().enumerate() {
-                let Some(leaf) = tree.leaf_of(idx) else {
-                    continue;
-                };
-                let codisp = if let Some(hit) = leaf_cache.get(&leaf) {
-                    *hit
-                } else {
-                    match walk_codisp(tree.store(), leaf) {
-                        Ok(c) => {
-                            leaf_cache.insert(leaf, c);
-                            c
-                        }
-                        Err(e) => {
-                            walk_err = Some(e);
-                            break 'trees;
-                        }
-                    }
-                };
-                totals[i] += codisp;
-                counts[i] = counts[i].saturating_add(1);
-            }
-        }
+        // Rayon-parallel per-tree walks. Each worker owns its own
+        // leaf-cache `HashMap` so the shared-walk amortisation
+        // stays intact, and per-tree `(partial_totals, partial_counts)`
+        // `Vec`s are reduced at the end via component-wise sum.
+        // Tree state is read-only during the walks (only `walk_codisp`
+        // touches `tree.store()`), so `par_iter` over `&self.trees`
+        // is sound.
+        let per_tree = codisp_many_walks_all_trees(&self.trees, &probe_indices, n);
+        let (totals, counts, walk_err) = match per_tree {
+            Ok((totals, counts)) => (totals, counts, None),
+            Err(e) => (vec![0.0_f64; n], vec![0_usize; n], Some(e)),
+        };
 
         // Always bulk-delete probes — even on walk error — so the
         // forest returns to a clean state before the error surfaces.
@@ -1503,6 +1472,115 @@ fn process_tree_update<const D: usize>(
         SamplerOp::Rejected => {}
     }
     Ok(freed)
+}
+
+/// Batched per-tree codisp walks with per-thread leaf cache —
+/// rayon parallel across trees, component-wise reduce into
+/// `(totals[n_probes], counts[n_probes])`. Each worker builds its
+/// own `HashMap<NodeRef, f64>` so the shared-walk optimisation
+/// stays intact within the thread.
+fn codisp_many_walks_all_trees<const D: usize>(
+    trees: &[TreeSlot<D>],
+    probe_indices: &[usize],
+    n: usize,
+) -> RcfResult<(Vec<f64>, Vec<usize>)> {
+    type PerTree = (Vec<f64>, Vec<usize>);
+    let per_tree_fn = |tree: &RandomCutTree<D>| -> RcfResult<PerTree> {
+        use std::collections::HashMap;
+        let mut totals = vec![0.0_f64; n];
+        let mut counts = vec![0_usize; n];
+        let mut leaf_cache: HashMap<crate::tree::NodeRef, f64> = HashMap::new();
+        for (i, &idx) in probe_indices.iter().enumerate() {
+            let Some(leaf) = tree.leaf_of(idx) else {
+                continue;
+            };
+            let codisp = if let Some(hit) = leaf_cache.get(&leaf) {
+                *hit
+            } else {
+                let c = walk_codisp(tree.store(), leaf)?;
+                leaf_cache.insert(leaf, c);
+                c
+            };
+            totals[i] += codisp;
+            counts[i] = counts[i].saturating_add(1);
+        }
+        Ok((totals, counts))
+    };
+
+    let reduce_pair = |mut a: PerTree, b: PerTree| -> PerTree {
+        for i in 0..n {
+            a.0[i] += b.0[i];
+            a.1[i] = a.1[i].saturating_add(b.1[i]);
+        }
+        a
+    };
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        trees
+            .par_iter()
+            .map(|(tree, _, _)| per_tree_fn(tree))
+            .try_reduce(|| (vec![0.0_f64; n], vec![0_usize; n]), |a, b| Ok(reduce_pair(a, b)))
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut acc: PerTree = (vec![0.0_f64; n], vec![0_usize; n]);
+        for (tree, _, _) in trees {
+            acc = reduce_pair(acc, per_tree_fn(tree)?);
+        }
+        Ok(acc)
+    }
+}
+
+/// Walk `walk_codisp` on every tree that holds leaf `idx` and
+/// fold the per-tree codisp into `(sum, count)`. Serial or rayon
+/// parallel fold/reduce depending on the `parallel` cargo feature.
+/// Trees that rejected the probe (no `leaf_of(idx)`) contribute
+/// nothing. Fails on the first per-tree walk error.
+fn codisp_walk_all_trees<const D: usize>(
+    trees: &[TreeSlot<D>],
+    idx: usize,
+) -> RcfResult<(f64, usize)> {
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        trees
+            .par_iter()
+            .map(|(tree, _, _)| -> RcfResult<Option<f64>> {
+                let Some(leaf) = tree.leaf_of(idx) else {
+                    return Ok(None);
+                };
+                walk_codisp(tree.store(), leaf).map(Some)
+            })
+            .try_fold(
+                || (0.0_f64, 0_usize),
+                |(t, c), step| {
+                    let s = step?;
+                    Ok::<_, RcfError>(match s {
+                        Some(v) => (t + v, c + 1),
+                        None => (t, c),
+                    })
+                },
+            )
+            .try_reduce(
+                || (0.0_f64, 0_usize),
+                |(t1, c1), (t2, c2)| Ok((t1 + t2, c1 + c2)),
+            )
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut total = 0.0_f64;
+        let mut count = 0_usize;
+        for (tree, _, _) in trees {
+            let Some(leaf) = tree.leaf_of(idx) else {
+                continue;
+            };
+            total += walk_codisp(tree.store(), leaf)?;
+            count = count.saturating_add(1);
+        }
+        Ok((total, count))
+    }
 }
 
 /// Stateless codisp aggregation across trees — each tree computes
