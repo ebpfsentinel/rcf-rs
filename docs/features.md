@@ -120,13 +120,41 @@ leaf → root in every tree accumulating
 `max(sibling.mass / subtree.mass)` per level, then deletes the
 probe. Matches the rrcf / AWS Java `codisp` semantic — captures
 contextual displacement better than pure isolation depth on
-wide-window anomalies. ~30× slower than `score()` (sequential
-per tree, mutates the reservoir), intended for SOC triage /
-forensic replay, not the eBPF hot path. On NAB `realKnownCause`
-it lifts aggregate AUC from 0.719 (`score()`) to 0.776 —
-beats both rrcf (0.748) and AWS Java (0.757).
+wide-window anomalies. ~25× slower than `score()` post the
+rayon-per-tree parallel walk + delete refactor; mutates the
+reservoir per probe (baseline drifts on long eval streams, see
+stateless variant below). On NAB `realKnownCause` lifts
+aggregate AUC from 0.719 (`score()`) to 0.776 — beats rrcf
+(0.748) and AWS Java (0.757).
 
-Source: `src/forest/random_cut_forest.rs`.
+`score_codisp_many(&[points])` — batched variant with per-tree
+shared-walk cache + rayon across trees. Pre-inserts every probe,
+walks once per unique leaf, bulk-deletes. Saturates the
+reservoir past batch ≥ sample_size → `EmptyForest`.
+
+`score_codisp_stateless(&point)` / `score_codisp_stateless_many`
+— **drift-free** codisp estimate via root → leaf descent along
+stored cuts, `max(sibling_mass / subtree_mass)` per depth, zero
+reservoir mutation. Takes `&self`, parallel across trees,
+preserves the frozen baseline exactly. Aggregate AUC 0.763 on
+NAB, 0.751 on TSB-AD-M — ~0.01-0.02 below the mutating variant
+but 12× faster on NAB (1.09 s full corpus vs 12.6 s). Preferred
+for long eval streams.
+
+Source: `src/forest/random_cut_forest.rs`, `src/tree/random_cut_tree.rs`.
+
+### Fused score + attribution
+
+`RandomCutForest::score_and_attribution(&point)` returns
+`(AnomalyScore, DiVector)` from a **single tree walk** instead
+of two — ~40 % faster than calling `score` + `attribution`
+back-to-back. Uses `ScoreAttributionVisitor` which folds both
+accumulators in one pass; scalar accumulator + per-dim
+attribution split share the same `blend × damp` computation.
+
+Types: `ScoreAttributionVisitor`.
+
+Source: `src/visitor/combined.rs`.
 
 ### Early-termination scoring
 
@@ -470,6 +498,33 @@ Types: `HistogramConfig`, `ScoreHistogram`.
 Source: `src/histogram.rs`.
 
 Example: `examples/observability.rs`.
+
+## Hot-path integration (eBPF ingress)
+
+### `UpdateSampler` + `channel` MPSC split
+
+`rcf_rs::hot_path::UpdateSampler` drops low-value updates before
+any RCF work. Two decision modes:
+
+- `accept_stride()` — monotonic counter, keeps `1 / keep_every_n`
+  offers deterministically.
+- `accept_hash(flow_hash)` — per-flow sampling (flows with
+  `flow_hash % keep_every_n == 0` admitted in full, others
+  rejected in full). Preserves baseline shape per flow rather
+  than slicing any single flow.
+
+`channel::<D>(capacity)` returns `(UpdateProducer<D>,
+UpdateConsumer<D>)` — bounded MPSC on `std::sync::mpsc::sync_channel`.
+Clone the producer per classifier thread; hand the consumer to a
+dedicated updater thread. `try_enqueue` is non-blocking; on
+queue-full it drops + increments `dropped_total` (ops signal
+for "classifier outpaces updater"). The classifier scores
+against the previous-generation forest snapshot while the
+updater drains at its own cadence.
+
+Types: `UpdateSampler`, `UpdateProducer<D>`, `UpdateConsumer<D>`.
+
+Source: `src/hot_path.rs`.
 
 ## Multi-tenancy
 

@@ -25,9 +25,12 @@ bootstrap, warm reload, group scores, attribution stability,
 forensic baseline, Platt calibrator, severity bands, alert
 clustering, audit trail, CUSUM meta-drift, feature drift PSI/KL,
 t-digest streaming quantiles, score histogram, bulk batch
-scoring, timestamp retention, early termination,
-probe-based codisp scoring, score confidence intervals,
-metrics sink, …).
+scoring + cache-aware Morton reordering, timestamp retention,
+early termination, probe-based codisp scoring (mutating + batched
++ stateless drift-free variant), fused score + attribution
+single-walk, score confidence intervals, hot-path eBPF ingress
+primitives (`UpdateSampler` + bounded MPSC channel for
+classifier/updater thread split), metrics sink, …).
 
 ## Quickstart
 
