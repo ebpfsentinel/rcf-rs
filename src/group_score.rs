@@ -43,6 +43,10 @@
 //! then be less than [`DiVector::total`]. [`GroupScores::coverage`]
 //! exposes the ratio so callers can spot either case.
 
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use crate::domain::DiVector;
 use crate::error::{RcfError, RcfResult};
 
@@ -305,7 +309,7 @@ impl GroupScores {
     pub fn top_group(&self) -> Option<(&str, f64)> {
         self.scores
             .iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal))
             .map(|(n, s)| (n.as_str(), *s))
     }
 }

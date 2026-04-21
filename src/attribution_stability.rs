@@ -25,6 +25,13 @@
 //! variance in two sweeps. For an AWS-default forest (100 trees, D=16)
 //! the extra allocation is ~26 KB.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use num_traits::Float;
+
 use crate::domain::DiVector;
 use crate::domain::point::ensure_finite;
 use crate::error::{RcfError, RcfResult};

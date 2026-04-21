@@ -46,6 +46,15 @@
 //! # }
 //! ```
 
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use num_traits::Float;
+
 use crate::audit::AlertRecord;
 use crate::domain::{AnomalyScore, DiVector};
 use crate::error::{RcfError, RcfResult};
@@ -284,15 +293,19 @@ where
         let cutoff = now_ms.saturating_sub(self.window_ms);
         let before = self.clusters.len();
         self.clusters.retain(|c| c.last_seen_ms >= cutoff);
-        let pruned = before.saturating_sub(self.clusters.len());
         #[cfg(feature = "std")]
-        if pruned > 0 {
-            self.metrics.inc_counter(
-                crate::metrics::names::ALERT_CLUSTERS_PRUNED_TOTAL,
-                pruned as u64,
-            );
-            self.emit_active_gauge();
+        {
+            let pruned = before.saturating_sub(self.clusters.len());
+            if pruned > 0 {
+                self.metrics.inc_counter(
+                    crate::metrics::names::ALERT_CLUSTERS_PRUNED_TOTAL,
+                    pruned as u64,
+                );
+                self.emit_active_gauge();
+            }
         }
+        #[cfg(not(feature = "std"))]
+        let _ = before;
     }
 
     /// Clear every cluster.

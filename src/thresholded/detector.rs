@@ -28,6 +28,8 @@
 //! the distribution of scores the forest would assign to unseen
 //! points.
 
+use alloc::vec::Vec;
+
 use crate::config::RcfConfig;
 use crate::domain::point::ensure_finite;
 use crate::domain::{AnomalyScore, DiVector};

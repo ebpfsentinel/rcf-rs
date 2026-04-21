@@ -24,6 +24,10 @@
 //! Good enough for SOC tuning, not for publication-grade error
 //! bars.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use num_traits::Float;
+
 use crate::domain::AnomalyScore;
 
 /// Default `z` factor for a 95 % normal-approximation CI.

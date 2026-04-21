@@ -21,6 +21,8 @@
 //! it when you do not care about tail latency and want the full
 //! ensemble answer.
 
+use alloc::format;
+
 use crate::error::{RcfError, RcfResult};
 
 /// Default minimum tree count before the early-term check kicks

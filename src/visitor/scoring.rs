@@ -14,6 +14,10 @@
 //! `normalizer`, `1.0` for `damp`) so visitors never observe NaN or
 //! infinity.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use num_traits::Float;
+
 /// `score_seen(depth, mass) = 1 / (depth + log2(mass))`, clamped to
 /// `0.0` when the denominator is non-positive.
 #[must_use]

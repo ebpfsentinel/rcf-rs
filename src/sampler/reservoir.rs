@@ -49,9 +49,14 @@
 //! guarantees this through its
 //! [`crate::forest`-stored point indices](crate::tree::PointAccessor).
 
-use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use alloc::collections::BinaryHeap;
+use alloc::format;
+use alloc::vec::Vec;
+use core::cmp::Ordering;
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use num_traits::Float;
 use rand::{Rng, RngCore};
 
 use crate::error::{RcfError, RcfResult};

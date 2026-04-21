@@ -8,6 +8,10 @@
 //! anomalous dimension. The shape mirrors the AWS RCF reference and
 //! Guha et al. (2016) attribution algorithm.
 
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::error::{RcfError, RcfResult};
 
 /// Two-sided per-dimension attribution accumulator.

@@ -37,6 +37,14 @@
 //!    [`Self::max_psi`]; optionally [`Self::reset_production`] to
 //!    start a fresh production window.
 
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use num_traits::Float;
+
 use crate::error::{RcfError, RcfResult};
 
 #[cfg(feature = "std")]

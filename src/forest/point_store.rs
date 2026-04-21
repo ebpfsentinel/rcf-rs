@@ -13,7 +13,9 @@
 //! The store implements [`PointAccessor`] so trees borrow leaf
 //! points through it during traversal and bbox recomputation.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use alloc::format;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::domain::point::ensure_finite;
 use crate::error::{RcfError, RcfResult};
@@ -67,6 +69,9 @@ mod point_slots_serde {
     //! not yet ship `Deserialize` for `[T; N]` at arbitrary `N` —
     //! only fixed sizes up to 32. `D` is fixed at the type level so
     //! deserialisation rejects payloads whose array length differs.
+    use alloc::format;
+    use alloc::vec::Vec;
+
     use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
     /// Snapshot every `Option<[f64; D]>` slot to an
@@ -114,7 +119,8 @@ mod atomic_u32_vec_serde {
     //! Serde adapter that snapshots a `Vec<AtomicU32>` to / from a
     //! `Vec<u32>` payload using `Ordering::Relaxed` (consistent with
     //! the runtime's intended ordering for refcount loads).
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicU32, Ordering};
 
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 

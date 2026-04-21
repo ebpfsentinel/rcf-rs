@@ -105,6 +105,8 @@
 // fail-fast idioms and opt out here.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::panic))]
 
+extern crate alloc;
+
 #[cfg(feature = "std")]
 pub mod adwin;
 pub mod alert_cluster;

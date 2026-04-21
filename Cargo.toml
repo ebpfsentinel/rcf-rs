@@ -27,21 +27,22 @@ unsafe_code = "forbid"
 
 [features]
 default = ["std", "parallel", "serde", "postcard"]
-std = []
+std = ["rand/std", "rand/std_rng", "rand_chacha/std", "getrandom/std", "thiserror/std"]
 serde = ["dep:serde", "rand_chacha/serde"]
 serde_json = ["dep:serde_json", "serde"]
 postcard = ["dep:postcard", "serde"]
-parallel = ["dep:rayon"]
+parallel = ["dep:rayon", "std"]
 
 [dependencies]
-thiserror = "2"
-rand = { version = "0.9", default-features = false, features = ["std", "std_rng"] }
-rand_chacha = { version = "0.9", default-features = false, features = ["std"] }
-getrandom = "0.3"
-wide = "0.7"
-serde = { version = "1", features = ["derive"], optional = true }
+thiserror = { version = "2", default-features = false }
+num-traits = { version = "0.2", default-features = false, features = ["libm"] }
+rand = { version = "0.9", default-features = false }
+rand_chacha = { version = "0.9", default-features = false }
+getrandom = { version = "0.3", default-features = false }
+wide = { version = "0.7", default-features = false }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
 serde_json = { version = "1", optional = true }
-postcard = { version = "1", default-features = false, features = ["alloc", "use-std"], optional = true }
+postcard = { version = "1", default-features = false, features = ["alloc"], optional = true }
 rayon = { version = "1", optional = true }
 
 [dev-dependencies]

@@ -27,6 +27,13 @@
 //! weight bound. This amortises per-record cost to `O(1)` and keeps
 //! query latency bounded in `O(δ)`.
 
+use alloc::format;
+use alloc::vec::Vec;
+
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use num_traits::Float;
+
 use crate::error::{RcfError, RcfResult};
 
 /// Default compression parameter — 100 balances accuracy and

@@ -19,8 +19,13 @@
 //! layer) hand a [`PointAccessor`] in for any operation that needs
 //! to know a leaf's location.
 
-use std::borrow::Cow;
+use alloc::borrow::Cow;
+use alloc::format;
+use alloc::vec::Vec;
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use num_traits::Float;
 use rand::RngCore;
 
 use crate::domain::{BoundingBox, Cut, ensure_dim, ensure_finite};

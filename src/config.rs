@@ -10,6 +10,9 @@
 //! so the bounding-box and per-tree node storage live on the stack
 //! and the compiler can vectorise the hot tree-traversal loops.
 
+use alloc::format;
+use alloc::vec::Vec;
+
 use crate::error::{RcfError, RcfResult};
 use crate::forest::random_cut_forest::RandomCutForest;
 

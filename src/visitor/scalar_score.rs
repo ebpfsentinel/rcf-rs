@@ -13,6 +13,10 @@
 //! depth). At the leaf the contribution collapses to
 //! `score_seen · damp`. The final score is `accumulated / log2(total_mass)`.
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use num_traits::Float;
+
 use crate::domain::{AnomalyScore, BoundingBox, Cut};
 use crate::visitor::Visitor;
 use crate::visitor::scoring::{damp, normalizer, score_seen, score_unseen};

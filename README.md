@@ -23,15 +23,20 @@ See [docs/features.md](docs/features.md) for the catalogue of
 optional modules on top of the bare forest (TRCF, tenant pool,
 `ShingledForest` for scalar-stream temporal anomaly detection,
 bootstrap, warm reload, group scores, attribution stability,
-forensic baseline, Platt calibrator, severity bands, alert
-clustering, audit trail, CUSUM meta-drift, feature drift PSI/KL,
-t-digest streaming quantiles, score histogram, bulk batch
-scoring, timestamp retention,
-early termination, probe-based codisp scoring (mutating + batched
-+ stateless drift-free variant), fused score + attribution
-single-walk, score confidence intervals, hot-path eBPF ingress
-primitives (`UpdateSampler` + bounded MPSC channel for
-classifier/updater thread split), metrics sink, …).
+forensic baseline, Platt calibrator (batch + online SGD),
+severity bands, alert clustering (cosine + LSH), audit trail,
+CUSUM meta-drift, ADWIN adaptive windowing, feature drift
+PSI/KL, t-digest streaming quantiles, score histogram,
+SPOT/DSPOT univariate Peaks-Over-Threshold, Fisher p-value
+combination, SOC-feedback ingestion (`FeedbackStore`),
+SAGE Shapley attribution, drift-aware shadow forest swap,
+runtime-dim `DynamicForest`, bulk batch scoring, timestamp
+retention, early termination, probe-based codisp scoring
+(mutating + batched + stateless drift-free variant), fused
+score + attribution single-walk, score confidence intervals,
+hot-path eBPF ingress primitives (`UpdateSampler` +
+`PrefixRateCap` + bounded MPSC channel for classifier/updater
+thread split), metrics sink, …).
 
 ## Quickstart
 
@@ -71,14 +76,33 @@ Details: [docs/conformance.md](docs/conformance.md).
 | Cargo feature | Default | Role |
 |---|---|---|
 | `std` | ✅ | Standard library support |
-| `parallel` | ✅ | Per-tree / batch parallelism via `rayon` |
+| `parallel` | ✅ | Per-tree / batch parallelism via `rayon` (implies `std`) |
 | `serde` | ✅ | State serialisation |
 | `postcard` | ✅ | Compact binary persistence (implies `serde`) |
 | `serde_json` | ❌ | JSON persistence (implies `serde`) |
 
-Opt out of the production profile via
-`default-features = false` for embedded / mono-thread / no-persistence
-scenarios.
+### `no_std` + `alloc`
+
+`default-features = false` drops the runtime layer (MPSC channel,
+tenant pool, drift-aware shadow swap, ADWIN, LSH clustering, SAGE,
+SPOT/DSPOT, feedback store, shingled forest, dynamic forest)
+and leaves the core forest + trees + reservoir sampler +
+thresholded layer + meta / feature drift detectors + t-digest
++ alert clusterer + bootstrap + calibrator + forensic baseline
++ audit record + severity bands running under `#![no_std]` with
+`alloc`. Transcendentals (`ln`, `sqrt`, `exp`, …) route through
+`num-traits` + `libm`; hashing-dependent code paths fall back
+to `alloc::collections::BTreeMap`.
+
+```toml
+[dependencies]
+rcf-rs = { version = "…", default-features = false }
+# Optional: serde persistence under no_std
+rcf-rs = { version = "…", default-features = false, features = ["serde"] }
+```
+
+The `no_std` configuration is gated in CI (`cargo check
+--no-default-features` + `--features serde`).
 
 ## Performance
 

@@ -5,6 +5,8 @@
 //! caller to act without re-fetching state. [`RcfResult`] is the
 //! convenient `Result` alias used in public signatures.
 
+use alloc::string::String;
+
 use thiserror::Error;
 
 /// Errors produced by `rcf-rs`.

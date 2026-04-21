@@ -14,6 +14,9 @@
 //! mass) instead of duplicating per-leaf coordinate data, saving
 //! ~6 MB at default configuration.
 
+use alloc::format;
+use alloc::vec::Vec;
+
 use crate::domain::{BoundingBox, Cut};
 use crate::error::{RcfError, RcfResult};
 use crate::tree::node::{InternalData, LeafData, NodeRef, NodeView, NodeViewMut};

@@ -22,6 +22,12 @@
 //! refuse to emit an anomaly verdict before enough data has been
 //! seen.
 
+use alloc::format;
+
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use num_traits::Float;
+
 use crate::error::{RcfError, RcfResult};
 
 /// Exponentially-weighted running mean + variance.

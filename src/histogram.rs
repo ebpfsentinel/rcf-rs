@@ -17,6 +17,10 @@
 //! [`crate::MetaDriftDetector::observe`], etc. Composition over
 //! entanglement: no dependency on the forest machinery.
 
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::error::{RcfError, RcfResult};
 
 /// Default number of equal-width bins used when the caller does not

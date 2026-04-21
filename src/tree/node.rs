@@ -32,7 +32,7 @@ use crate::domain::{BoundingBox, Cut};
 ///     assert!(tree.root().is_none()); // empty forest has no root yet
 /// }
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NodeRef(u32);
 

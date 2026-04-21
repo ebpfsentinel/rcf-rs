@@ -54,6 +54,8 @@
 //! accumulators and the EMA, e.g. after a config change or a major
 //! regime switch.
 
+use alloc::format;
+
 use crate::error::{RcfError, RcfResult};
 use crate::thresholded::EmaStats;
 

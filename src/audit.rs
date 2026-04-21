@@ -33,6 +33,8 @@
 //! `serde` sink — `postcard` for compact per-event bytes, JSON for
 //! pipelines that want self-describing records.
 
+use alloc::string::String;
+
 use crate::domain::{AnomalyScore, DiVector};
 use crate::error::RcfResult;
 use crate::forensic::ForensicBaseline;

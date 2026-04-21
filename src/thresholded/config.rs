@@ -13,6 +13,8 @@
 //! The builder mirrors [`crate::ForestBuilder`] so forest and threshold
 //! parameters can be tuned side-by-side in one fluent chain.
 
+use alloc::format;
+
 use crate::config::ForestBuilder;
 use crate::error::{RcfError, RcfResult};
 use crate::thresholded::detector::ThresholdedForest;

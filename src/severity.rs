@@ -11,6 +11,8 @@
 //! `Default` provides a sensible starting point for RCF scores
 //! derived from the crate's Guha-2016-style scoring convention.
 
+use alloc::format;
+
 use crate::domain::AnomalyScore;
 use crate::error::{RcfError, RcfResult};
 use crate::thresholded::AnomalyGrade;

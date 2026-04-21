@@ -7,6 +7,9 @@
 
 /// Snapshot `[f64; D]` to / from a `Vec<f64>` payload.
 pub(crate) mod fixed_array_f64 {
+    use alloc::format;
+    use alloc::vec::Vec;
+
     use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
     /// Write the array as a borrowed slice — the downstream encoder

@@ -6,6 +6,8 @@
 //! at the future `RandomCutForest::update` / `RandomCutForest::score`
 //! boundary functions instead of inside every helper.
 
+use alloc::vec::Vec;
+
 use crate::error::{RcfError, RcfResult};
 
 /// A point in `d`-dimensional Euclidean space.

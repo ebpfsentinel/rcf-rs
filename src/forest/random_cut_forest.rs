@@ -12,6 +12,13 @@
 //! `traverse` with a fresh visitor and average the per-tree outputs
 //! — matching the AWS spec ("average across trees").
 
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use num_traits::Float;
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -92,7 +99,7 @@ pub struct RandomCutForest<const D: usize> {
     /// whenever a slot's reservoir refcount drops to zero
     /// (reservoir eviction or explicit [`Self::delete`]).
     #[cfg_attr(feature = "serde", serde(default))]
-    timestamps: std::collections::HashMap<usize, u64>,
+    timestamps: alloc::collections::BTreeMap<usize, u64>,
 }
 
 impl<const D: usize> RandomCutForest<D> {
@@ -166,7 +173,7 @@ impl<const D: usize> RandomCutForest<D> {
             pool,
             #[cfg(feature = "std")]
             metrics: crate::metrics::default_sink(),
-            timestamps: std::collections::HashMap::new(),
+            timestamps: alloc::collections::BTreeMap::new(),
         })
     }
 
@@ -267,6 +274,7 @@ impl<const D: usize> RandomCutForest<D> {
     /// counter on the installed sink before propagating the error.
     /// Upstream bad-data volume is a first-class SOC signal.
     #[inline]
+    #[cfg_attr(not(feature = "std"), allow(clippy::unused_self))]
     fn ensure_finite_metered(&self, point: &[f64; D]) -> RcfResult<()> {
         match ensure_finite(point) {
             Ok(()) => Ok(()),
@@ -1596,8 +1604,9 @@ fn process_tree_update<const D: usize>(
 /// Batched per-tree codisp walks with per-thread leaf cache —
 /// rayon parallel across trees, component-wise reduce into
 /// `(totals[n_probes], counts[n_probes])`. Each worker builds its
-/// own `HashMap<NodeRef, f64>` so the shared-walk optimisation
+/// own `BTreeMap<NodeRef, f64>` so the shared-walk optimisation
 /// stays intact within the thread.
+#[cfg(feature = "std")]
 fn codisp_many_walks_all_trees<const D: usize>(
     trees: &[TreeSlot<D>],
     probe_indices: &[usize],
@@ -1605,10 +1614,10 @@ fn codisp_many_walks_all_trees<const D: usize>(
 ) -> RcfResult<(Vec<f64>, Vec<usize>)> {
     type PerTree = (Vec<f64>, Vec<usize>);
     let per_tree_fn = |tree: &RandomCutTree<D>| -> RcfResult<PerTree> {
-        use std::collections::HashMap;
+        use alloc::collections::BTreeMap;
         let mut totals = vec![0.0_f64; n];
         let mut counts = vec![0_usize; n];
-        let mut leaf_cache: HashMap<crate::tree::NodeRef, f64> = HashMap::new();
+        let mut leaf_cache: BTreeMap<crate::tree::NodeRef, f64> = BTreeMap::new();
         for (i, &idx) in probe_indices.iter().enumerate() {
             let Some(leaf) = tree.leaf_of(idx) else {
                 continue;

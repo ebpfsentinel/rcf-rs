@@ -34,6 +34,13 @@
 //! serde and reuse at inference time via
 //! [`PlattCalibrator::calibrate`].
 
+use alloc::format;
+use alloc::vec::Vec;
+
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use num_traits::Float;
+
 use crate::error::{RcfError, RcfResult};
 
 /// Default maximum Newton-Raphson iterations — well past the point
