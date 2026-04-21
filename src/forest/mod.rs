@@ -12,4 +12,4 @@ pub mod point_store;
 pub mod random_cut_forest;
 
 pub use point_store::PointStore;
-pub use random_cut_forest::{RandomCutForest, locality_bucket};
+pub use random_cut_forest::RandomCutForest;

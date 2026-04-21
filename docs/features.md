@@ -101,15 +101,6 @@ design so the closure needs no `Send + Sync` bound; preferred for
 hot ingest paths that stream results directly into a writer /
 histogram / alert pipeline.
 
-`score_many_locality_sorted(points)` — opt-in cache-aware variant
-that sorts the batch by `locality_bucket` (8-bit quantised Morton-
-lite key over the first 8 dims) before dispatching. Returns
-results in caller order via an internal permutation inversion. Wins
-on strongly-correlated batches where adjacent probes traverse
-similar tree paths; ~break-even on uniform batches because the
-`O(N log N)` sort + double gather overhead absorbs the cache gain.
-Bench on your own workload before swapping in.
-
 Example: `examples/bulk_scoring.rs`.
 
 ### Score with confidence interval

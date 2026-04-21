@@ -1250,71 +1250,6 @@ impl<const D: usize> RandomCutForest<D> {
         }
     }
 
-    /// Cache-aware bulk scoring — sorts the batch by a cheap
-    /// locality key ([`crate::forest::locality_bucket`]) before
-    /// dispatching, in the hope that probes with close-by
-    /// coordinates on the leading dimensions traverse similar
-    /// root→leaf paths and let each rayon worker re-use warm arena
-    /// cache lines.
-    ///
-    /// Results are returned in **caller order** — the internal
-    /// permutation is inverted before returning. Semantically
-    /// identical to [`Self::score_many`] up to floating-point
-    /// summation.
-    ///
-    /// Caveat: on the reference `(100 trees, 256 samples, D = 16)`
-    /// configuration the sort + permutation overhead outweighs the
-    /// cache-locality win on uniformly-drawn batches — the plain
-    /// [`Self::score_many`] stays faster. This path is kept as an
-    /// opt-in for callers whose batches are **strongly correlated**
-    /// (SOC alert replay of a single flow, periodic tenant-scan
-    /// where contiguous probes share a feature vector shape) and
-    /// who have measured a win on their own workload. Do not swap
-    /// in blindly.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`Self::score_many`].
-    pub fn score_many_locality_sorted(&self, points: &[[f64; D]]) -> RcfResult<Vec<AnomalyScore>> {
-        let n = points.len();
-        if n == 0 {
-            return Ok(Vec::new());
-        }
-        // Sort-permutation by locality bucket; caller order is
-        // restored at the end via `orig_idx`.
-        let mut perm: Vec<usize> = (0..n).collect();
-        perm.sort_unstable_by_key(|&i| locality_bucket(&points[i]));
-
-        #[cfg(feature = "parallel")]
-        let sorted: RcfResult<Vec<(usize, AnomalyScore)>> = {
-            use rayon::prelude::*;
-            let run = || {
-                perm.par_iter()
-                    .map(|&i| self.score(&points[i]).map(|s| (i, s)))
-                    .collect::<RcfResult<Vec<_>>>()
-            };
-            if let Some(pool) = self.pool.as_deref() {
-                pool.install(run)
-            } else {
-                run()
-            }
-        };
-        #[cfg(not(feature = "parallel"))]
-        let sorted: RcfResult<Vec<(usize, AnomalyScore)>> = perm
-            .iter()
-            .map(|&i| self.score(&points[i]).map(|s| (i, s)))
-            .collect();
-        let sorted = sorted?;
-
-        // Un-permute.
-        let zero = AnomalyScore::new(0.0)?;
-        let mut out = vec![zero; n];
-        for (orig_idx, s) in sorted {
-            out[orig_idx] = s;
-        }
-        Ok(out)
-    }
-
     /// No-alloc bulk scoring — invoke `on_score(index, score)` for
     /// every probe in order instead of collecting a `Vec`. Avoids
     /// the intermediate allocation on hot paths where the caller
@@ -1821,36 +1756,6 @@ fn codisp_stateless_aggregate<const D: usize>(
     }
 }
 
-/// Cheap locality key used by
-/// [`RandomCutForest::score_many_locality_sorted`] — quantises the
-/// first `min(D, 8)` dimensions into 8-bit buckets and packs them
-/// into a `u64`. Probes close in the leading dims hash close, so
-/// sorting by this key groups probes whose tree descents share
-/// arena cache lines.
-///
-/// The quantisation range is `[-100, 100]` clamped, tuned for
-/// z-scored features (typical z-score magnitudes stay inside
-/// `±6σ`). Values outside saturate to the extreme bucket. Callers
-/// running on raw unnormalised data should post-process (scale /
-/// z-score) before calling this key for meaningful locality.
-#[must_use]
-pub fn locality_bucket<const D: usize>(p: &[f64; D]) -> u64 {
-    let dims = D.min(8);
-    let mut key: u64 = 0;
-    for (d, &coord) in p.iter().take(dims).enumerate() {
-        let clamped = coord.clamp(-100.0, 100.0);
-        // Map [-100, 100] linearly to [0, 255].
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            clippy::cast_precision_loss
-        )]
-        let bucket = ((clamped * 1.275) + 128.0).clamp(0.0, 255.0) as u64;
-        key |= (bucket & 0xFF) << (d * 8);
-    }
-    key
-}
-
 /// Score aggregation across trees. Serial fold or rayon parallel
 /// fold/reduce depending on the `parallel` cargo feature.
 /// Walk leaf → root on `tree.store()` computing the rrcf-style
@@ -2236,63 +2141,6 @@ mod tests {
             assert!((di_merged.high()[d] - di_split.high()[d]).abs() < 1e-9);
             assert!((di_merged.low()[d] - di_split.low()[d]).abs() < 1e-9);
         }
-    }
-
-    #[test]
-    fn locality_bucket_is_deterministic() {
-        let p = [0.25_f64, -0.5, 1.5, 0.0];
-        assert_eq!(locality_bucket(&p), locality_bucket(&p));
-    }
-
-    #[test]
-    fn locality_bucket_groups_close_points() {
-        // Nearby points in the leading dims must land in adjacent
-        // or identical buckets — this is the signal sort_unstable
-        // consumes for cache-friendly ordering.
-        let a = [0.10_f64, 0.20, 0.30, 0.40];
-        let b = [0.11_f64, 0.21, 0.31, 0.41];
-        let c = [900.0_f64, 0.20, 0.30, 0.40];
-        let ka = locality_bucket(&a);
-        let kb = locality_bucket(&b);
-        let kc = locality_bucket(&c);
-        // `a` and `b` differ by <1 quantisation step on each dim:
-        // their keys match exactly.
-        assert_eq!(ka, kb);
-        // `c` is far in dim 0 — key differs significantly.
-        assert_ne!(ka, kc);
-    }
-
-    #[test]
-    fn score_many_locality_sorted_matches_score_many_output() {
-        let mut f = small_forest();
-        for i in 0..200 {
-            #[allow(clippy::cast_precision_loss)]
-            let v = i as f64 * 0.01;
-            f.update([v, v + 0.5]).unwrap();
-        }
-        let probes: Vec<[f64; 2]> = (0..64)
-            .map(|i| {
-                #[allow(clippy::cast_precision_loss)]
-                let x = (i as f64) * 0.07;
-                [x, x + 1.0]
-            })
-            .collect();
-        let plain = f.score_many(&probes).unwrap();
-        let sorted = f.score_many_locality_sorted(&probes).unwrap();
-        assert_eq!(plain.len(), sorted.len());
-        for (a, b) in plain.iter().zip(sorted.iter()) {
-            assert!((f64::from(*a) - f64::from(*b)).abs() < 1e-9);
-        }
-    }
-
-    #[test]
-    fn score_many_locality_sorted_empty_input() {
-        let mut f = small_forest();
-        for _ in 0..50 {
-            f.update([0.1, 0.2]).unwrap();
-        }
-        let out = f.score_many_locality_sorted(&[]).unwrap();
-        assert!(out.is_empty());
     }
 
     #[test]

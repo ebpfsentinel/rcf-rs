@@ -182,7 +182,7 @@ pub use ensemble::{chi_squared_survival_even, fisher_combine};
 pub use error::{RcfError, RcfResult};
 pub use feature_drift::{DriftLevel, FeatureDriftDetector};
 pub use forensic::ForensicBaseline;
-pub use forest::{PointStore, RandomCutForest, locality_bucket};
+pub use forest::{PointStore, RandomCutForest};
 pub use group_score::{FeatureGroup, FeatureGroups, FeatureGroupsBuilder, GroupScores};
 pub use histogram::{HistogramConfig, ScoreHistogram};
 #[cfg(feature = "std")]
