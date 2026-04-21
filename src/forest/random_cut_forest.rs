@@ -493,23 +493,27 @@ impl<const D: usize> RandomCutForest<D> {
     /// Propagates [`crate::RandomCutTree::delete`] and
     /// [`PointStore`] failures.
     pub fn delete(&mut self, point_idx: usize) -> RcfResult<bool> {
+        #[cfg(feature = "parallel")]
+        let pool = self.pool.clone();
+
         let Self {
             trees,
             point_store,
             timestamps,
             ..
         } = self;
-        let mut removed_from_any = false;
-        let mut went_to_zero = false;
-        for (tree, sampler, _) in trees.iter_mut() {
-            if sampler.remove(point_idx) {
-                tree.delete(point_idx, &*point_store)?;
-                if point_store.decr_ref(point_idx)? {
-                    went_to_zero = true;
-                }
-                removed_from_any = true;
-            }
-        }
+        let store: &PointStore<D> = point_store;
+
+        #[cfg(feature = "parallel")]
+        let (removed_from_any, went_to_zero) = if let Some(p) = pool.as_deref() {
+            p.install(|| delete_from_trees(trees, store, point_idx))?
+        } else {
+            delete_from_trees(trees, store, point_idx)?
+        };
+
+        #[cfg(not(feature = "parallel"))]
+        let (removed_from_any, went_to_zero) = delete_from_trees(trees, store, point_idx)?;
+
         if went_to_zero {
             point_store.set_free(point_idx)?;
             timestamps.remove(&point_idx);
@@ -1436,6 +1440,70 @@ fn update_trees<const D: usize>(
             out.append(&mut local);
         }
         Ok(out)
+    }
+}
+
+/// Parallel-friendly per-tree delete — rayon `par_chunks_mut`
+/// across `trees` under the `parallel` feature, reduce the two
+/// bool flags `(removed_from_any, went_to_zero)` at the end. Each
+/// worker loops through its chunk, attempts sampler removal,
+/// deletes the leaf from the tree, and decrements the store
+/// refcount. `PointStore::decr_ref` is atomic so the shared store
+/// reference is safe to hand to every worker.
+fn delete_from_trees<const D: usize>(
+    trees: &mut [TreeSlot<D>],
+    store: &PointStore<D>,
+    point_idx: usize,
+) -> RcfResult<(bool, bool)> {
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let chunk_size = trees.len().div_ceil(rayon::current_num_threads()).max(1);
+        let partials: RcfResult<Vec<(bool, bool)>> = trees
+            .par_chunks_mut(chunk_size)
+            .map(|chunk| -> RcfResult<(bool, bool)> {
+                let mut any = false;
+                let mut zero = false;
+                for slot in chunk {
+                    let (a, z) = process_tree_delete(slot, store, point_idx)?;
+                    any |= a;
+                    zero |= z;
+                }
+                Ok((any, zero))
+            })
+            .collect();
+        let parts = partials?;
+        Ok(parts
+            .into_iter()
+            .fold((false, false), |(a1, z1), (a2, z2)| (a1 | a2, z1 | z2)))
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut any = false;
+        let mut zero = false;
+        for slot in trees.iter_mut() {
+            let (a, z) = process_tree_delete(slot, store, point_idx)?;
+            any |= a;
+            zero |= z;
+        }
+        Ok((any, zero))
+    }
+}
+
+/// Per-tree delete step used by [`delete_from_trees`] — returns
+/// `(removed_here, store_hit_zero)`.
+fn process_tree_delete<const D: usize>(
+    slot: &mut TreeSlot<D>,
+    store: &PointStore<D>,
+    point_idx: usize,
+) -> RcfResult<(bool, bool)> {
+    let (tree, sampler, _) = slot;
+    if sampler.remove(point_idx) {
+        tree.delete(point_idx, store)?;
+        let hit_zero = store.decr_ref(point_idx)?;
+        Ok((true, hit_zero))
+    } else {
+        Ok((false, false))
     }
 }
 
