@@ -12,10 +12,12 @@
 use crate::domain::{BoundingBox, Cut};
 
 pub mod attribution;
+pub mod combined;
 pub mod scalar_score;
 pub mod scoring;
 
 pub use attribution::AttributionVisitor;
+pub use combined::ScoreAttributionVisitor;
 pub use scalar_score::ScalarScoreVisitor;
 
 /// Trait implemented by anyone observing a root→leaf traversal of a

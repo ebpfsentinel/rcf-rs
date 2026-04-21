@@ -163,4 +163,4 @@ pub use thresholded::{
 pub use tree::{
     InternalData, LeafData, NodeRef, NodeStore, NodeView, NodeViewMut, PointAccessor, RandomCutTree,
 };
-pub use visitor::{AttributionVisitor, ScalarScoreVisitor, Visitor};
+pub use visitor::{AttributionVisitor, ScalarScoreVisitor, ScoreAttributionVisitor, Visitor};

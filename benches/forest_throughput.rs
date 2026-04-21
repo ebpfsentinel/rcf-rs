@@ -140,5 +140,65 @@ fn bench_attribution(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_insert, bench_score, bench_attribution);
+fn bench_score_and_attribution_for<const D: usize>(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    num_trees: usize,
+    sample_size: usize,
+) {
+    let id = format!("{num_trees}t_{sample_size}s_{D}d");
+    group.bench_function(&id, |b| {
+        let forest = build_warm_forest::<D>(num_trees, sample_size, 2026);
+        let mut rng = ChaCha8Rng::seed_from_u64(17);
+        b.iter(|| {
+            let mut p = [0.0_f64; D];
+            for slot in &mut p {
+                *slot = <ChaCha8Rng as rand::Rng>::random::<f64>(&mut rng);
+            }
+            let out = forest
+                .score_and_attribution(black_box(&p))
+                .expect("score_and_attribution succeeds");
+            black_box(out);
+        });
+    });
+}
+
+fn bench_split_score_then_attribution_for<const D: usize>(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    num_trees: usize,
+    sample_size: usize,
+) {
+    let id = format!("{num_trees}t_{sample_size}s_{D}d");
+    group.bench_function(&id, |b| {
+        let forest = build_warm_forest::<D>(num_trees, sample_size, 2026);
+        let mut rng = ChaCha8Rng::seed_from_u64(17);
+        b.iter(|| {
+            let mut p = [0.0_f64; D];
+            for slot in &mut p {
+                *slot = <ChaCha8Rng as rand::Rng>::random::<f64>(&mut rng);
+            }
+            let s = forest.score(black_box(&p)).expect("score succeeds");
+            let di = forest
+                .attribution(black_box(&p))
+                .expect("attribution succeeds");
+            black_box((s, di));
+        });
+    });
+}
+
+fn bench_combined(c: &mut Criterion) {
+    let mut merged = c.benchmark_group("forest_score_and_attribution");
+    bench_score_and_attribution_for::<16>(&mut merged, 100, 256);
+    merged.finish();
+    let mut split = c.benchmark_group("forest_split_score_then_attribution");
+    bench_split_score_then_attribution_for::<16>(&mut split, 100, 256);
+    split.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_insert,
+    bench_score,
+    bench_attribution,
+    bench_combined
+);
 criterion_main!(benches);

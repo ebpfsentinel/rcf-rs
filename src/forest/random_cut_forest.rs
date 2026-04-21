@@ -23,7 +23,7 @@ use crate::error::{RcfError, RcfResult};
 use crate::forest::point_store::PointStore;
 use crate::sampler::{ReservoirSampler, SamplerOp};
 use crate::tree::{PointAccessor, RandomCutTree};
-use crate::visitor::{AttributionVisitor, ScalarScoreVisitor};
+use crate::visitor::{AttributionVisitor, ScalarScoreVisitor, ScoreAttributionVisitor};
 
 /// Per-tree state: tree + sampler + dedicated RNG. The dedicated
 /// RNG is what unlocks parallel insertion under the `parallel`
@@ -890,6 +890,58 @@ impl<const D: usize> RandomCutForest<D> {
         Ok(accumulator)
     }
 
+    /// Single-walk score + attribution — when the caller needs both,
+    /// this path traverses each tree **once** instead of twice. Saves
+    /// the second round of cache loads, bounding-box probability
+    /// SIMD passes, and rayon fan-out. Roughly the cost of a lone
+    /// [`Self::attribution`] call; the `AnomalyScore` sortie is free.
+    ///
+    /// Semantically identical to calling [`Self::score`] and
+    /// [`Self::attribution`] back-to-back (up to floating-point
+    /// summation order).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::score`] / [`Self::attribution`].
+    pub fn score_and_attribution(
+        &self,
+        point: &[f64; D],
+    ) -> RcfResult<(AnomalyScore, DiVector)> {
+        self.ensure_finite_metered(point)?;
+        let scaled = self.scale_point_copy(point);
+        let point = &scaled;
+
+        #[cfg(feature = "parallel")]
+        let (total, mut accumulator, count) = if let Some(p) = self.pool.as_deref() {
+            p.install(|| score_attribution_aggregate::<D>(&self.trees, point))?
+        } else {
+            score_attribution_aggregate::<D>(&self.trees, point)?
+        };
+
+        #[cfg(not(feature = "parallel"))]
+        let (total, mut accumulator, count) =
+            score_attribution_aggregate::<D>(&self.trees, point)?;
+
+        if count == 0 {
+            return Err(RcfError::EmptyForest);
+        }
+
+        #[allow(clippy::cast_precision_loss)]
+        let divisor = count as f64;
+        let mean = total / divisor;
+        let score = AnomalyScore::new(mean.max(0.0))?;
+        accumulator.scale(divisor)?;
+
+        #[cfg(feature = "std")]
+        {
+            self.metrics
+                .observe_histogram(crate::metrics::names::SCORE_OBSERVATION, f64::from(score));
+            self.metrics
+                .inc_counter(crate::metrics::names::ATTRIBUTION_TOTAL, 1);
+        }
+        Ok((score, accumulator))
+    }
+
     /// Bulk-score a slice of points — under the `parallel` feature
     /// each point is fanned out to rayon workers across the batch
     /// while each individual score still parallelises across trees
@@ -1359,6 +1411,66 @@ fn attribution_aggregate<const D: usize>(
     }
 }
 
+/// Combined score + attribution aggregation — single traversal per
+/// tree via [`ScoreAttributionVisitor`]. Serial accumulate or rayon
+/// parallel fold/reduce depending on the `parallel` cargo feature.
+fn score_attribution_aggregate<const D: usize>(
+    trees: &[TreeSlot<D>],
+    point: &[f64; D],
+) -> RcfResult<(f64, DiVector, usize)> {
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        trees
+            .par_iter()
+            .map(|(tree, _, _)| -> RcfResult<Option<(f64, DiVector)>> {
+                let Some(root) = tree.root() else {
+                    return Ok(None);
+                };
+                let mass = tree.store().view(root)?.mass();
+                let visitor = ScoreAttributionVisitor::new(point, mass)?;
+                let (s, di) = tree.traverse(point, visitor)?;
+                Ok(Some((f64::from(s), di)))
+            })
+            .try_fold(
+                || (0.0_f64, DiVector::zeros(D), 0_usize),
+                |(t, mut acc, c), step| match step? {
+                    Some((s, di)) => {
+                        acc.accumulate(&di)?;
+                        Ok::<_, RcfError>((t + s, acc, c + 1))
+                    }
+                    None => Ok((t, acc, c)),
+                },
+            )
+            .try_reduce(
+                || (0.0_f64, DiVector::zeros(D), 0_usize),
+                |(t1, mut a1, c1), (t2, a2, c2)| {
+                    a1.accumulate(&a2)?;
+                    Ok((t1 + t2, a1, c1 + c2))
+                },
+            )
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut total = 0.0_f64;
+        let mut accumulator = DiVector::zeros(D);
+        let mut count = 0_usize;
+        for (tree, _, _) in trees {
+            let Some(root) = tree.root() else {
+                continue;
+            };
+            let mass = tree.store().view(root)?.mass();
+            let visitor = ScoreAttributionVisitor::new(point, mass)?;
+            let (s, di) = tree.traverse(point, visitor)?;
+            total += f64::from(s);
+            accumulator.accumulate(&di)?;
+            count += 1;
+        }
+        Ok((total, accumulator, count))
+    }
+}
+
 // Compile-time Send + Sync assertions.
 const _: fn() = || {
     fn assert_send<T: Send>() {}
@@ -1512,6 +1624,46 @@ mod tests {
         let (lo, hi) = ci.ci95();
         assert!(lo <= plain);
         assert!(hi >= plain);
+    }
+
+    #[test]
+    fn score_and_attribution_matches_split_calls() {
+        let mut f = small_forest();
+        for i in 0..200 {
+            #[allow(clippy::cast_precision_loss)]
+            let v = i as f64 * 0.01;
+            f.update([v, v + 0.5]).unwrap();
+        }
+        let probe = [5.0, -3.0]; // clear outlier to produce non-zero attribution
+        let s_split: f64 = f.score(&probe).unwrap().into();
+        let di_split = f.attribution(&probe).unwrap();
+        let (s_merged, di_merged) = f.score_and_attribution(&probe).unwrap();
+        assert!((f64::from(s_merged) - s_split).abs() < 1e-9);
+        for d in 0..2 {
+            assert!((di_merged.high()[d] - di_split.high()[d]).abs() < 1e-9);
+            assert!((di_merged.low()[d] - di_split.low()[d]).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn score_and_attribution_rejects_empty_forest() {
+        let f = small_forest();
+        assert!(matches!(
+            f.score_and_attribution(&[0.0, 0.0]).unwrap_err(),
+            RcfError::EmptyForest
+        ));
+    }
+
+    #[test]
+    fn score_and_attribution_rejects_nan() {
+        let mut f = small_forest();
+        for _ in 0..10 {
+            f.update([0.1, 0.2]).unwrap();
+        }
+        assert!(matches!(
+            f.score_and_attribution(&[f64::NAN, 0.0]).unwrap_err(),
+            RcfError::NaNValue
+        ));
     }
 
     #[test]
