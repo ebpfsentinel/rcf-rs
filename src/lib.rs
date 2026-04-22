@@ -137,6 +137,7 @@ pub mod hot_path;
 pub mod lsh_cluster;
 pub mod meta_drift;
 pub mod metrics;
+pub mod online_stats;
 #[cfg(feature = "serde")]
 pub mod persistence;
 #[cfg(feature = "std")]
@@ -192,6 +193,7 @@ pub use hot_path::{PrefixRateCap, UpdateConsumer, UpdateProducer, UpdateSampler}
 pub use lsh_cluster::{LshAlertClusterer, LshClusterDecision};
 pub use meta_drift::{CusumConfig, DriftKind, DriftVerdict, MetaDriftDetector};
 pub use metrics::{MetricsSink, NoopSink};
+pub use online_stats::OnlineStats;
 #[cfg(feature = "std")]
 pub use pool::{ReadinessSummary, TenantForestPool};
 #[cfg(feature = "std")]

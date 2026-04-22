@@ -20,9 +20,9 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rcf_rs::{
     AdwinDetector, CusumConfig, DiVector, DriftAwareForest, DriftRecoveryConfig, DynamicForest,
-    FeatureDriftDetector, ForestBuilder, LshAlertClusterer, MetaDriftDetector, PlattCalibrator,
-    PlattFitConfig, PotDetector, SageEstimator, ScoreHistogram, ShingledForestBuilder, TDigest,
-    ensemble::fisher_combine, hot_path,
+    FeatureDriftDetector, ForestBuilder, LshAlertClusterer, MetaDriftDetector, OnlineStats,
+    PlattCalibrator, PlattFitConfig, PotDetector, SageEstimator, ScoreHistogram,
+    ShingledForestBuilder, TDigest, ensemble::fisher_combine, hot_path,
 };
 use std::hint::black_box;
 
@@ -556,6 +556,59 @@ fn bench_sage(c: &mut Criterion) {
     group.finish();
 }
 
+/// `OnlineStats` — Welford streaming mean + variance. Target:
+/// per-sample `update()` cost and `variance()` read cost on a
+/// warmed accumulator.
+fn bench_online_stats(c: &mut Criterion) {
+    let mut group = c.benchmark_group("online_stats");
+
+    group.bench_function("update_cold", |b| {
+        b.iter(|| {
+            let mut s = OnlineStats::default();
+            for i in 0..32_u64 {
+                s.update(black_box(f64::from(u32::try_from(i).unwrap_or(0))));
+            }
+            black_box(s);
+        });
+    });
+
+    group.bench_function("update_hot", |b| {
+        let mut s = OnlineStats::default();
+        for i in 0..1_000_u64 {
+            s.update(f64::from(u32::try_from(i).unwrap_or(0)));
+        }
+        let mut v = 0.5_f64;
+        b.iter(|| {
+            v = v.mul_add(1.000_000_1, 1.0);
+            s.update(black_box(v));
+        });
+    });
+
+    group.bench_function("variance_read", |b| {
+        let mut s = OnlineStats::default();
+        for i in 0..1_000_u64 {
+            s.update(f64::from(u32::try_from(i).unwrap_or(0)));
+        }
+        b.iter(|| {
+            let v = s.variance();
+            black_box(v);
+        });
+    });
+
+    group.bench_function("std_dev_read", |b| {
+        let mut s = OnlineStats::default();
+        for i in 0..1_000_u64 {
+            s.update(f64::from(u32::try_from(i).unwrap_or(0)));
+        }
+        b.iter(|| {
+            let v = s.std_dev();
+            black_box(v);
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_hot_path_sampler,
@@ -573,6 +626,7 @@ criterion_group!(
     bench_fisher,
     bench_dynamic_forest,
     bench_drift_aware,
-    bench_sage
+    bench_sage,
+    bench_online_stats
 );
 criterion_main!(benches);
