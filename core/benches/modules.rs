@@ -15,7 +15,7 @@
 #![allow(clippy::cast_precision_loss)]
 
 use anomstream_core::{
-    AdwinDetector, CountMinSketch, CusumConfig, DriftAwareForest, DriftRecoveryConfig,
+    AdwinDetector, BloomFilter, CountMinSketch, CusumConfig, DriftAwareForest, DriftRecoveryConfig,
     DynamicForest, FeatureDriftDetector, FeatureGroups, ForestBuilder, HyperLogLog,
     MetaDriftDetector, NormStrategy, Normalizer, OnlineStats, PerFeatureCusum,
     PerFeatureCusumConfig, PerFeatureEwma, PerFeatureEwmaConfig, PotDetector, RandomCutForest,
@@ -852,6 +852,65 @@ fn bench_hyperloglog(c: &mut Criterion) {
     group.finish();
 }
 
+/// `BloomFilter` — IOC membership sketch. Covers the per-key
+/// `insert`/`contains` paths at two load points (1 K / 100 K
+/// inserts, both sized at `fpr = 0.01`) plus the bitwise-OR
+/// `union` for cross-shard aggregation.
+fn bench_bloom(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bloom");
+
+    group.bench_function("insert_bytes_n1k_p01", |b| {
+        let mut bf = BloomFilter::new(1_000, 0.01).expect("bf build");
+        let mut rng = ChaCha8Rng::seed_from_u64(2026);
+        b.iter(|| {
+            let v: u64 = rng.random();
+            bf.insert_bytes(black_box(&v.to_le_bytes()));
+        });
+    });
+
+    group.bench_function("contains_bytes_n100k_p01", |b| {
+        let mut bf = BloomFilter::new(100_000, 0.01).expect("bf build");
+        let mut rng = ChaCha8Rng::seed_from_u64(2026);
+        for _ in 0..100_000 {
+            let v: u64 = rng.random();
+            bf.insert_bytes(&v.to_le_bytes());
+        }
+        let mut probe = ChaCha8Rng::seed_from_u64(7);
+        b.iter(|| {
+            let v: u64 = probe.random();
+            let hit = bf.contains_bytes(black_box(&v.to_le_bytes()));
+            black_box(hit);
+        });
+    });
+
+    group.bench_function("insert_hash_n100k_p01", |b| {
+        let mut bf = BloomFilter::new(100_000, 0.01).expect("bf build");
+        let mut rng = ChaCha8Rng::seed_from_u64(2026);
+        b.iter(|| {
+            let h1: u64 = rng.random();
+            let h2: u64 = rng.random();
+            bf.insert_hash(black_box(h1), black_box(h2));
+        });
+    });
+
+    group.bench_function("union_n10k_p01", |b| {
+        let mut a = BloomFilter::new(10_000, 0.01).expect("bf build");
+        let mut other = BloomFilter::new(10_000, 0.01).expect("bf build");
+        let mut rng = ChaCha8Rng::seed_from_u64(2026);
+        for _ in 0..5_000 {
+            a.insert_bytes(&rng.random::<u64>().to_le_bytes());
+            other.insert_bytes(&rng.random::<u64>().to_le_bytes());
+        }
+        b.iter(|| {
+            let mut scratch = a.clone();
+            scratch.union(black_box(&other)).expect("union");
+            black_box(scratch);
+        });
+    });
+
+    group.finish();
+}
+
 /// `SpaceSaving` — deterministic top-K heavy hitters. Covers the
 /// hot (tracked-key) path, the cold/evict path (linear `O(K)`
 /// scan), and the `top_k` ranking step after saturating the table
@@ -927,6 +986,7 @@ criterion_group!(
     bench_bootstrap,
     bench_persistence,
     bench_hyperloglog,
-    bench_space_saving
+    bench_space_saving,
+    bench_bloom
 );
 criterion_main!(benches);

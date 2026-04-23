@@ -449,6 +449,47 @@ Source: `src/histogram.rs`.
 
 Example: `examples/observability.rs`.
 
+### `BloomFilter` — probabilistic set membership
+
+Word-packed bit bank of size `m` paired with `k` hash probes per
+key. Sized from `(n, p)` — expected insert count `n` and target
+false-positive rate `p` — via the optimal formulas
+`m = ⌈−n · ln(p) / (ln 2)²⌉` and `k = round((m/n) · ln 2)`. At the
+design load the filter meets its `p` budget; zero false negatives
+hold unconditionally.
+
+Typical IOC-lookup sizing at `p = 0.01`: 10 K entries → ≈ 12 KiB
+and 7 hashes, 100 K → ≈ 120 KiB and 7 hashes, 1 M → ≈ 1.2 MiB
+and 7 hashes. The `k = 7` pattern is characteristic of `p = 0.01`
+and fixed across feed sizes.
+
+Hashing uses a single `SipHash` pass (`DefaultHasher`) split into
+two 64-bit lanes and combined by the Kirsch-Mitzenmacher
+double-hashing trick `g_i(x) = h1 + i·h2 (mod m)` — halves the
+hashing cost with no accuracy penalty at practical filter
+parameters.
+
+Gated behind `std`.
+
+API: `new(capacity, fpr)` + `with_capacity(capacity)` (`fpr = 0.01`)
++ `with_params(num_bits, num_hashes)` (exact control) +
+`insert<T: Hash>(&T)` + `insert_bytes(&[u8])` + `insert_hash(u64,
+u64)` (escape hatch) + matching `contains*` variants + `union(&Self)`
+(bitwise OR for cross-shard merge) + `reset()` + accessors
+(`num_bits`, `num_hashes`, `memory_bytes`, `total_added`,
+`effective_fpr`, `is_empty`).
+
+Types: `BloomFilter`, `BLOOM_DEFAULT_FPR`, `BLOOM_MAX_HASHES`.
+
+References:
+
+1. B. Bloom, *Space/Time Trade-offs in Hash Coding with Allowable
+   Errors*, CACM 13(7), 1970.
+2. A. Kirsch, M. Mitzenmacher, *Less Hashing, Same Performance:
+   Building a Better Bloom Filter*, ESA 2006.
+
+Source: `src/bloom.rs`.
+
 ### `CountMinSketch` — probabilistic frequency sketch
 
 `d` pairwise-independent hash rows over `w` counters. Each

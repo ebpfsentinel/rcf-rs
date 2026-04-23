@@ -163,6 +163,8 @@ extern crate alloc;
 #[cfg(feature = "std")]
 pub mod adwin;
 pub mod attribution_stability;
+#[cfg(feature = "std")]
+pub mod bloom;
 pub mod bootstrap;
 pub mod config;
 #[cfg(feature = "std")]
@@ -214,6 +216,10 @@ pub use adwin::{
     AdwinDetector, DEFAULT_DELTA as ADWIN_DEFAULT_DELTA, DEFAULT_WINDOW_CAP as ADWIN_DEFAULT_WINDOW,
 };
 pub use attribution_stability::AttributionStability;
+#[cfg(feature = "std")]
+pub use bloom::{
+    BloomFilter, DEFAULT_FALSE_POSITIVE_RATE as BLOOM_DEFAULT_FPR, MAX_HASHES as BLOOM_MAX_HASHES,
+};
 pub use bootstrap::BootstrapReport;
 pub use config::{ForestBuilder, RcfConfig};
 #[cfg(feature = "std")]

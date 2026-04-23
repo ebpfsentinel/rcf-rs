@@ -8,13 +8,14 @@ the workspace:
   attribution, codisp batched + loop).
 - `core/benches/extended.rs` — bulk, early-term, forensic, tenant,
   stateless codisp, thresholded process, delete.
-- `core/benches/modules.rs` — 21 groups: shingled forest, t-digest
+- `core/benches/modules.rs` — 22 groups: shingled forest, t-digest
   / histogram, feature / meta drift, ADWIN, SPOT/DSPOT, Fisher,
   dynamic-dim forest, drift-aware shadow swap, companion
   primitives (OnlineStats / CountMinSketch / HyperLogLog /
-  SpaceSaving / Normalizer / PerFeatureEwma / PerFeatureCusum),
-  and five explain / triage extras (group_scores /
-  attribution_stability / score_ci / bootstrap / persistence).
+  SpaceSaving / BloomFilter / Normalizer / PerFeatureEwma /
+  PerFeatureCusum), and five explain / triage extras
+  (group_scores / attribution_stability / score_ci / bootstrap /
+  persistence).
 - `triage/benches/modules.rs` — LSH clustering, Platt calibration,
   SAGE explanations, AlertClusterer (cosine), FeedbackStore.
 - `hotpath/benches/modules.rs` — UpdateSampler, PrefixRateCap,
@@ -386,6 +387,10 @@ into `anomstream-core` for OSS reuse.
 | `CountMinSketch::increment` w=2048 d=4            | 65 ns    | ~15 M/s     |
 | `CountMinSketch::estimate` w=2048 d=4             | 61 ns    | ~16 M/s     |
 | `CountMinSketch::reset` w=2048 d=4                | 808 ns   | per-reset   |
+| `BloomFilter::insert_bytes` n=1k, p=0.01          | 22.6 ns  | ~44 M/s     |
+| `BloomFilter::insert_hash` n=100k, p=0.01         | 18.5 ns  | ~54 M/s     |
+| `BloomFilter::contains_bytes` n=100k, p=0.01      | 32.0 ns  | ~31 M/s     |
+| `BloomFilter::union` two n=10k, p=0.01 filters    | 259 ns   | per-merge   |
 | `HyperLogLog::add_bytes` p=12                     | 11.5 ns  | ~87 M/s     |
 | `HyperLogLog::add_hash` p=12                      | 2.7 ns   | ~370 M/s    |
 | `HyperLogLog::estimate` after 100k adds, p=12     | 18.6 µs  | query-only  |
@@ -419,6 +424,13 @@ Insights:
   heavy-hitter workloads the table stabilises so the hot path
   dominates. `top_k(10)` over 1024 entries (5.6 µs) is the
   query-time rank cost — run out-of-band, not per-packet.
+- **BloomFilter insert_hash (18.5 ns) < insert_bytes (22.6 ns)**:
+  the `_hash` path skips the single `SipHash` call, leaving just
+  `k = 7` word-bank writes. `contains` costs ≈ `insert` under
+  the miss-path (has to probe every hash before it can return
+  `false`); positive lookups short-circuit on the first unset
+  bit. `union` is a pure bitwise OR across the bit bank —
+  scales with `m`, not `n`.
 - **PerFeatureEwma spike < warmed**: the zero-variance branch
   (returns `f64::MAX` immediately) skips the sqrt — visible
   in the 33 ns gap vs the warmed normal path.
