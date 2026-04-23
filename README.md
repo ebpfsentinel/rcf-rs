@@ -225,7 +225,7 @@ See [docs/performance.md](docs/performance.md) for the full criterion bench matr
 
 ## Quality evaluation (TSB-AD-M)
 
-For detection-quality benchmarking, anomstream ships the VUS-PR metric (Paparrizos VLDB 2022) and a TSB-AD-M CSV loader. Dataset isn't bundled — download from [huggingface.co/datasets/yzhao062/TSB-AD-M](https://github.com/thedatumorg/TSB-AD) (≈ 1 GiB).
+For detection-quality benchmarking, anomstream ships the VUS-PR metric (Paparrizos VLDB 2022) and a TSB-AD-M CSV loader. Dataset isn't bundled — download from [https://github.com/thedatumorg/TSB-AD](https://github.com/thedatumorg/TSB-AD) (≈ 1 GiB).
 
 Single-file run:
 
