@@ -1,4 +1,4 @@
-# anomstream-rs
+# anomstream
 
 A composable Rust toolkit for **streaming anomaly detection**. Multiple detector families (multivariate, per-feature, score-level) plus the primitives needed to turn them into production pipelines — streaming stats, normalisation, probability calibration, alert clustering, feedback loops, SOC triage, hot-path ingress.
 
@@ -194,9 +194,9 @@ t-digest + alert clusterer + bootstrap + calibrator + forensic baseline + audit 
 
 ```toml
 [dependencies]
-anomstream-rs = { version = "…", default-features = false }
+anomstream = { version = "…", default-features = false }
 # Optional: serde persistence under no_std
-anomstream-rs = { version = "…", default-features = false, features = ["serde"] }
+anomstream = { version = "…", default-features = false, features = ["serde"] }
 ```
 
 The `no_std` configuration is gated in CI (`cargo check --no-default-features` + `--features serde`).
