@@ -19,7 +19,7 @@ use anomstream_core::{
     DynamicForest, FeatureDriftDetector, FeatureGroups, ForestBuilder, HyperLogLog,
     MetaDriftDetector, NormStrategy, Normalizer, OnlineStats, PerFeatureCusum,
     PerFeatureCusumConfig, PerFeatureEwma, PerFeatureEwmaConfig, PotDetector, RandomCutForest,
-    ScoreHistogram, ShingledForestBuilder, TDigest, ensemble::fisher_combine,
+    ScoreHistogram, ShingledForestBuilder, SpaceSaving, TDigest, ensemble::fisher_combine,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
 use mimalloc::MiMalloc;
@@ -852,6 +852,58 @@ fn bench_hyperloglog(c: &mut Criterion) {
     group.finish();
 }
 
+/// `SpaceSaving` — deterministic top-K heavy hitters. Covers the
+/// hot (tracked-key) path, the cold/evict path (linear `O(K)`
+/// scan), and the `top_k` ranking step after saturating the table
+/// with distinct noise keys.
+fn bench_space_saving(c: &mut Criterion) {
+    let mut group = c.benchmark_group("space_saving");
+
+    group.bench_function("observe_hot_k128", |b| {
+        let mut ss: SpaceSaving<u32> = SpaceSaving::with_default_capacity().expect("ss build");
+        // Warm the table with 128 tracked keys.
+        for k in 0..128_u32 {
+            ss.observe(k);
+        }
+        let mut rng = ChaCha8Rng::seed_from_u64(2026);
+        b.iter(|| {
+            // Keys in [0, 128) already tracked → hot path, no evict.
+            let k: u32 = rng.random_range(0..128);
+            ss.observe(black_box(k));
+        });
+    });
+
+    group.bench_function("observe_cold_k128", |b| {
+        let mut ss: SpaceSaving<u64> = SpaceSaving::with_default_capacity().expect("ss build");
+        // Saturate with 128 distinct keys — every subsequent
+        // observation hits the evict path.
+        for k in 0..128_u64 {
+            ss.observe(k);
+        }
+        let mut rng = ChaCha8Rng::seed_from_u64(2026);
+        b.iter(|| {
+            // Fresh keys → never tracked → linear min-scan + swap.
+            let k: u64 = rng.random();
+            ss.observe(black_box(k));
+        });
+    });
+
+    group.bench_function("top_k_from_1024_distinct", |b| {
+        let mut ss: SpaceSaving<u32> = SpaceSaving::new(1024).expect("ss build");
+        let mut rng = ChaCha8Rng::seed_from_u64(2026);
+        for _ in 0..100_000 {
+            let k: u32 = rng.random();
+            ss.observe(k);
+        }
+        b.iter(|| {
+            let top = ss.top_k(black_box(10));
+            black_box(top);
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_shingled,
@@ -874,6 +926,7 @@ criterion_group!(
     bench_score_with_confidence,
     bench_bootstrap,
     bench_persistence,
-    bench_hyperloglog
+    bench_hyperloglog,
+    bench_space_saving
 );
 criterion_main!(benches);

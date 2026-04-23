@@ -13,7 +13,7 @@ Powers the ML detection pipeline of the **eBPFsentinel Enterprise** NDR agent; d
 - Multivariate anomaly detection (Random Cut Forest and variants)
 - Per-feature drift detectors (EWMA z-score, two-sided CUSUM, PSI / KL)
 - Score-level drift + regime-change (meta CUSUM, ADWIN, SPOT / DSPOT)
-- Streaming stats + sketches (Welford `OnlineStats`, t-digest, histograms, Count-Min Sketch, `HyperLogLog`)
+- Streaming stats + sketches (Welford `OnlineStats`, t-digest, histograms, Count-Min Sketch, `HyperLogLog`, Space-Saving top-K)
 - Normalisation (`Normalizer<D>` — min-max / z-score / identity)
 - Explanation + triage (per-dim attribution, SAGE Shapley, Platt calibration, severity bands, alert clustering, SOC feedback, audit trail, forensic baseline)
 - Hot-path ingress (sampler, rate cap, bounded MPSC channel, pluggable metrics sink)
@@ -58,6 +58,7 @@ The Random Cut Forest implementation inside the toolkit is a focused port of the
 - `ScoreHistogram` — fixed-bin score histogram
 - `CountMinSketch` — probabilistic frequency sketch (std-gated)
 - `HyperLogLog` — probabilistic distinct-count / cardinality sketch (std-gated)
+- `SpaceSaving<K>` — deterministic `O(K)`-memory top-K heavy hitters (std-gated, complements `CountMinSketch`)
 - `Normalizer<D>` — per-feature `MinMax` / `ZScore` / `None` transforms (with `fit(&[[f64; D]])` learner)
 
 **Explanation + triage**
@@ -170,6 +171,7 @@ Each detector cites the paper it implements. Representative references by family
 - **t-digest** — Dunning, *Computing Extremely Accurate Quantiles using t-Digests*, 2019.
 - **Count-Min Sketch** — Cormode & Muthukrishnan, JoA 55(1), 2005.
 - **HyperLogLog** — Flajolet, Fusy, Gandouet, Meunier — AofA 2007. *HyperLogLog in Practice*: Heule, Nunkesser, Hall, EDBT 2013.
+- **Space-Saving** — Metwally, Agrawal, El Abbadi, *Efficient Computation of Frequent and Top-k Elements in Data Streams*, ICDT 2005.
 - **SAGE** — Covert, Lundberg, Lee, *Understanding Global Feature Contributions Through Additive Importance Measures*, NeurIPS 2020.
 - **Welford variance** — Welford, Technometrics 4(3), 1962.
 
@@ -189,7 +191,7 @@ Details: [docs/conformance.md](docs/conformance.md).
 
 ### `no_std` + `alloc`
 
-`default-features = false` drops the runtime layer (MPSC channel, tenant pool, drift-aware shadow swap, ADWIN, LSH clustering, SAGE, SPOT/DSPOT, feedback store, shingled forest, dynamic forest, `CountMinSketch`, `HyperLogLog`) and leaves the core forest + trees + reservoir sampler + thresholded layer + meta / feature drift detectors +
+`default-features = false` drops the runtime layer (MPSC channel, tenant pool, drift-aware shadow swap, ADWIN, LSH clustering, SAGE, SPOT/DSPOT, feedback store, shingled forest, dynamic forest, `CountMinSketch`, `HyperLogLog`, `SpaceSaving`) and leaves the core forest + trees + reservoir sampler + thresholded layer + meta / feature drift detectors +
 t-digest + alert clusterer + bootstrap + calibrator + forensic baseline + audit record + severity bands + companion primitives (`OnlineStats`, `Normalizer<D>`, `PerFeatureEwma<D>`, `PerFeatureCusum<D>`) running under `#![no_std]` with `alloc`. Transcendentals (`ln`, `sqrt`, `exp`, …) route through `num-traits`
 
 - `libm`; hashing-dependent code paths fall back to `alloc::collections::BTreeMap`.

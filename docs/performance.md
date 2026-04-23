@@ -8,13 +8,13 @@ the workspace:
   attribution, codisp batched + loop).
 - `core/benches/extended.rs` — bulk, early-term, forensic, tenant,
   stateless codisp, thresholded process, delete.
-- `core/benches/modules.rs` — 20 groups: shingled forest, t-digest
+- `core/benches/modules.rs` — 21 groups: shingled forest, t-digest
   / histogram, feature / meta drift, ADWIN, SPOT/DSPOT, Fisher,
   dynamic-dim forest, drift-aware shadow swap, companion
-  primitives (OnlineStats / CountMinSketch / HyperLogLog / Normalizer /
-  PerFeatureEwma / PerFeatureCusum), and five explain / triage
-  extras (group_scores / attribution_stability / score_ci /
-  bootstrap / persistence).
+  primitives (OnlineStats / CountMinSketch / HyperLogLog /
+  SpaceSaving / Normalizer / PerFeatureEwma / PerFeatureCusum),
+  and five explain / triage extras (group_scores /
+  attribution_stability / score_ci / bootstrap / persistence).
 - `triage/benches/modules.rs` — LSH clustering, Platt calibration,
   SAGE explanations, AlertClusterer (cosine), FeedbackStore.
 - `hotpath/benches/modules.rs` — UpdateSampler, PrefixRateCap,
@@ -390,6 +390,9 @@ into `anomstream-core` for OSS reuse.
 | `HyperLogLog::add_hash` p=12                      | 2.7 ns   | ~370 M/s    |
 | `HyperLogLog::estimate` after 100k adds, p=12     | 18.6 µs  | query-only  |
 | `HyperLogLog::merge` two p=12 sketches            | 1.64 µs  | per-merge   |
+| `SpaceSaving::observe` tracked-key hot, K=128     | 9.7 ns   | ~103 M/s    |
+| `SpaceSaving::observe` evict path, K=128          | 310 ns   | ~3.2 M/s    |
+| `SpaceSaving::top_k(10)` from 1024 distinct keys  | 5.6 µs   | per-query   |
 | `PerFeatureEwma<16>::observe` (warmed)            | 129 ns   | ~7.8 M/s    |
 | `PerFeatureEwma<16>::observe` (spike path)        | 96 ns    | ~10 M/s     |
 | `PerFeatureEwma<16>::observe` (cold/warmup)       | 1.50 µs  | batch-only  |
@@ -410,6 +413,12 @@ Insights:
   key twice over 4 rows → same cost. `reset` is a zero-fill
   over 2048 × 4 × 8 B = 64 KiB → 808 ns ≈ 80 GiB/s memset
   (hitting DRAM on the first pass; L3 for warm).
+- **SpaceSaving hot ≪ evict (9.7 ns vs 310 ns)**: tracked-key
+  path is one HashMap lookup + counter increment; evict path
+  pays `O(K)` linear min-scan across 128 entries. Under
+  heavy-hitter workloads the table stabilises so the hot path
+  dominates. `top_k(10)` over 1024 entries (5.6 µs) is the
+  query-time rank cost — run out-of-band, not per-packet.
 - **PerFeatureEwma spike < warmed**: the zero-variance branch
   (returns `f64::MAX` immediately) skips the sqrt — visible
   in the 33 ns gap vs the warmed normal path.

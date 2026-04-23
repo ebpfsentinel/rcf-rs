@@ -200,6 +200,8 @@ pub mod serde_util;
 pub mod severity;
 #[cfg(feature = "std")]
 pub mod shingled;
+#[cfg(feature = "std")]
+pub mod space_saving;
 pub mod tdigest;
 pub mod thresholded;
 pub mod tree;
@@ -253,6 +255,10 @@ pub use score_ci::{DEFAULT_Z_FACTOR as DEFAULT_CI_Z_FACTOR, ScoreWithConfidence}
 pub use severity::{Severity, SeverityBands};
 #[cfg(feature = "std")]
 pub use shingled::{ShingledForest, ShingledForestBuilder};
+#[cfg(feature = "std")]
+pub use space_saving::{
+    DEFAULT_CAPACITY as SPACE_SAVING_DEFAULT_CAPACITY, HeavyHitter, HeavyHitterEntry, SpaceSaving,
+};
 pub use tdigest::{Centroid, DEFAULT_COMPRESSION as TDIGEST_DEFAULT_COMPRESSION, TDigest};
 pub use thresholded::{
     AnomalyGrade, EmaStats, ThresholdMode, ThresholdedConfig, ThresholdedForest,

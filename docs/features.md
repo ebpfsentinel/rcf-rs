@@ -515,6 +515,50 @@ References:
 
 Source: `src/hyperloglog.rs`.
 
+### `SpaceSaving<K>` — deterministic top-K heavy hitters
+
+Bounded table of at most `K` `(key, estimate, error)` entries.
+On each observation:
+
+1. Key already tracked → increment its `estimate`.
+2. Key new, table below capacity → insert with `estimate = 1`,
+   `error = 0`.
+3. Key new, table full → evict the current minimum entry `m`,
+   insert the new key with `estimate = m.estimate + 1` and
+   `error = m.estimate`.
+
+Guarantees (Metwally 2005):
+
+- Every key with true frequency `> N/K` is retained.
+- `estimate − error ≤ true_count ≤ estimate` for every tracked
+  key. `error_bound()` returns the `N/K` worst-case overestimate.
+
+Complements `CountMinSketch`: CMS is probabilistic per-key
+frequency, `SpaceSaving` is deterministic top-K under an `O(K)`
+memory cap. Typical `K = 128` costs ≈ 4 KiB for 16-byte keys
+(IPv6 addresses / flow-hash tuples). Per-observe cost is `O(1)`
+on the tracked-key path, `O(K)` on the evict path (linear scan
+for the minimum).
+
+Gated behind `std` (uses `std::collections::HashMap`).
+
+API: `new(capacity)` + `with_default_capacity()` (`K = 128`) +
+`observe(K)` + `observe_weighted(K, u64)` (byte-count heavy
+hitters) + `estimate(&K) -> Option<HeavyHitterEntry>` +
+`top_k(n) -> Vec<HeavyHitter<K>>` (ranked descending) + `iter()`
++ `reset()` + accessors (`capacity`, `len`, `is_empty`, `total`,
+`error_bound`).
+
+Types: `SpaceSaving<K>`, `HeavyHitter<K>`, `HeavyHitterEntry`,
+`SPACE_SAVING_DEFAULT_CAPACITY`.
+
+References:
+
+1. A. Metwally, D. Agrawal, A. El Abbadi, *Efficient Computation
+   of Frequent and Top-k Elements in Data Streams*, ICDT 2005.
+
+Source: `src/space_saving.rs`.
+
 ### `Normalizer<D>` — per-feature min-max / z-score
 
 Rescales a `D`-dimensional point into `[0, 1]` (MinMax) or
