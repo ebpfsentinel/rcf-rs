@@ -1243,6 +1243,49 @@ for direct parity with the AWS Java / rrcf codisp semantic. Both
 pin a 0.55 aggregate floor. See `docs/performance.md` for the
 per-source breakdown.
 
+### Quality metrics — VUS-PR (`vus_pr` module)
+
+`vus_pr` + `vus_pr_with_buffer` + `range_auc_pr` implement the
+Volume-Under-Surface PR metric (Paparrizos VLDB 2022) — a
+threshold-free, length-aware AUC-PR for time-series anomaly
+detection. For each buffer size `l ∈ [0, L]` the metric inflates
+the anomaly mask by `l` positions on both sides (precision side)
+and dilates the prediction set by `l` positions (recall side),
+computes `RangeAUCPR(l)`, then trapezoidally integrates over `l`.
+Rewards detectors whose scores peak *near* the true anomaly
+instead of exactly on it — the key weakness of point-wise AUC on
+TS workloads.
+
+Default `DEFAULT_MAX_BUFFER = 100` matches the typical average
+anomaly length on TSB-AD-M. Complexity `O(n · L²)` for the full
+surface; use `range_auc_pr(_, _, l)` when only a single `l` is
+needed.
+
+Types: `vus_pr`, `vus_pr_with_buffer`, `range_auc_pr`,
+`VUS_PR_DEFAULT_MAX_BUFFER`.
+
+Source: `src/vus_pr.rs`.
+
+### `TsbAdMDataset` — TSB-AD-M CSV loader
+
+Dependency-free CSV loader for the TSB-AD-M benchmark dumps (Liu
+& Paparrizos NeurIPS 2024). Parses the header, finds the `Label`
+column (any case-insensitive match, any position), loads the
+remaining columns as `f64` features, and exposes `.features`,
+`.labels`, `.feature_headers`, plus `column(c)` for univariate
+projections.
+
+`TsbAdMDataset::load_csv(path)` reads from disk;
+`TsbAdMDataset::parse_csv(&str)` handles in-memory buffers.
+Accepts both integer (`0` / `1`) and float (`0.0` / `1.0`) label
+encodings.
+
+Types: `TsbAdMDataset`.
+
+Source: `src/tsb_ad_m.rs`. Paired example:
+`examples/tsb_ad_m_eval.rs` (loads one CSV → `DynamicForest<128>`
+50/50 split → prints VUS-PR).
+
 ### Property-based fuzz suite
 
 `tests/fuzz_properties.rs` runs eight adversarial properties via

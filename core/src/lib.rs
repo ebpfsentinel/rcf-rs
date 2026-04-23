@@ -210,8 +210,12 @@ pub mod tdigest;
 pub mod thresholded;
 pub mod tree;
 #[cfg(feature = "std")]
+pub mod tsb_ad_m;
+#[cfg(feature = "std")]
 pub mod univariate_spot;
 pub mod visitor;
+#[cfg(feature = "std")]
+pub mod vus_pr;
 
 #[cfg(feature = "std")]
 pub use adwin::{
@@ -278,7 +282,13 @@ pub use tree::{
     InternalData, LeafData, NodeRef, NodeStore, NodeView, NodeViewMut, PointAccessor, RandomCutTree,
 };
 #[cfg(feature = "std")]
+pub use tsb_ad_m::TsbAdMDataset;
+#[cfg(feature = "std")]
 pub use univariate_spot::{
     DEFAULT_ALERT_P as SPOT_DEFAULT_ALERT_P, DEFAULT_QUANTILE as SPOT_DEFAULT_QUANTILE, PotDetector,
 };
 pub use visitor::{AttributionVisitor, ScalarScoreVisitor, ScoreAttributionVisitor, Visitor};
+#[cfg(feature = "std")]
+pub use vus_pr::{
+    DEFAULT_MAX_BUFFER as VUS_PR_DEFAULT_MAX_BUFFER, range_auc_pr, vus_pr, vus_pr_with_buffer,
+};

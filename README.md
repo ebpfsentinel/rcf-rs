@@ -12,6 +12,7 @@ Powers the ML detection pipeline of the **eBPFsentinel Enterprise** NDR agent; d
 
 - Multivariate anomaly detection (Random Cut Forest and variants)
 - Time-series discord / motif (Matrix Profile / STOMP — exact batch complement to the online shingled forest)
+- Evaluation metric (VUS-PR — threshold-free, length-aware AUC-PR for time-series) + TSB-AD-M CSV loader
 - Per-feature drift detectors (EWMA z-score, two-sided CUSUM, PSI / KL)
 - Score-level drift + regime-change (meta CUSUM, ADWIN, SPOT / DSPOT)
 - Streaming stats + sketches (Welford `OnlineStats`, t-digest, histograms, Count-Min Sketch, `HyperLogLog`, Space-Saving top-K, Bloom filter)
@@ -83,6 +84,12 @@ The Random Cut Forest implementation inside the toolkit is a focused port of the
 
 - `hot_path::UpdateSampler` / `PrefixRateCap` / `channel` — stride - hash + keyed sampler, 256-bucket atomic counter sketch, bounded MPSC channel for classifier/updater thread split
 - `MetricsSink` — pluggable telemetry (`NoopSink` + your own impl)
+
+**Evaluation**
+
+- `vus_pr` / `vus_pr_with_buffer` / `range_auc_pr` — Volume Under Surface PR (Paparrizos VLDB 2022), threshold-free length-aware quality metric
+- `TsbAdMDataset` — CSV loader for the TSB-AD-M multivariate benchmark (Liu & Paparrizos NeurIPS 2024)
+- `examples/tsb_ad_m_eval.rs` — end-to-end runner: load one TSB-AD-M CSV, score with `DynamicForest`, report VUS-PR
 
 See [docs/features.md](docs/features.md) for the full module catalogue with per-feature rationale.
 
@@ -177,6 +184,8 @@ Each detector cites the paper it implements. Representative references by family
 - **Space-Saving** — Metwally, Agrawal, El Abbadi, *Efficient Computation of Frequent and Top-k Elements in Data Streams*, ICDT 2005.
 - **Bloom filter** — Bloom, *Space/Time Trade-offs in Hash Coding with Allowable Errors*, CACM 13(7), 1970. Double-hashing: Kirsch & Mitzenmacher, *Less Hashing, Same Performance*, ESA 2006.
 - **Matrix Profile / STOMP** — Zhu, Zimmerman, Senobari, Yeh, Funning, Mueen, Brisk, Keogh, *Matrix Profile II: Exploiting a Novel Algorithm and GPUs…*, ICDM 2016. Original MP: Yeh et al., *Matrix Profile I*, ICDM 2016.
+- **VUS-PR** — Paparrizos, Boniol, Palpanas, Tsay, Elmore, Franklin, *Volume Under the Surface: A New Accuracy Evaluation Measure for Time-Series Anomaly Detection*, VLDB 2022.
+- **TSB-AD-M** — Liu, Paparrizos, *The Elephant in the Room: Towards A Reliable Time-Series Anomaly Detection Benchmark*, NeurIPS 2024.
 - **SAGE** — Covert, Lundberg, Lee, *Understanding Global Feature Contributions Through Additive Importance Measures*, NeurIPS 2020.
 - **Welford variance** — Welford, Technometrics 4(3), 1962.
 
@@ -196,7 +205,7 @@ Details: [docs/conformance.md](docs/conformance.md).
 
 ### `no_std` + `alloc`
 
-`default-features = false` drops the runtime layer (MPSC channel, tenant pool, drift-aware shadow swap, ADWIN, LSH clustering, SAGE, SPOT/DSPOT, feedback store, shingled forest, dynamic forest, `CountMinSketch`, `HyperLogLog`, `SpaceSaving`, `BloomFilter`, `MatrixProfile`) and leaves the core forest + trees + reservoir sampler + thresholded layer + meta / feature drift detectors +
+`default-features = false` drops the runtime layer (MPSC channel, tenant pool, drift-aware shadow swap, ADWIN, LSH clustering, SAGE, SPOT/DSPOT, feedback store, shingled forest, dynamic forest, `CountMinSketch`, `HyperLogLog`, `SpaceSaving`, `BloomFilter`, `MatrixProfile`, `TsbAdMDataset` + VUS-PR) and leaves the core forest + trees + reservoir sampler + thresholded layer + meta / feature drift detectors +
 t-digest + alert clusterer + bootstrap + calibrator + forensic baseline + audit record + severity bands + companion primitives (`OnlineStats`, `Normalizer<D>`, `PerFeatureEwma<D>`, `PerFeatureCusum<D>`) running under `#![no_std]` with `alloc`. Transcendentals (`ln`, `sqrt`, `exp`, …) route through `num-traits`
 
 - `libm`; hashing-dependent code paths fall back to `alloc::collections::BTreeMap`.
@@ -213,6 +222,27 @@ The `no_std` configuration is gated in CI (`cargo check --no-default-features` +
 ## Performance
 
 See [docs/performance.md](docs/performance.md) for the full criterion bench matrix. Benches are split across the three member crates: `cargo bench -p anomstream-core --bench modules` (detectors + primitives), `cargo bench -p anomstream-triage --bench modules` (Platt, SAGE, LSH), `cargo bench -p anomstream-hotpath --bench modules` (sampler, rate cap, channel).
+
+## Quality evaluation (TSB-AD-M)
+
+For detection-quality benchmarking, anomstream ships the VUS-PR metric (Paparrizos VLDB 2022) and a TSB-AD-M CSV loader. Dataset isn't bundled — download from [huggingface.co/datasets/yzhao062/TSB-AD-M](https://huggingface.co/datasets/yzhao062/TSB-AD-M) (≈ 1 GiB).
+
+Single-file run:
+
+```bash
+cargo run --release --example tsb_ad_m_eval -- /path/to/TSB-AD-M/MSL_1_001.csv
+# MSL_1_001.csv  n=2000  dim=55  pos=123  VUS-PR=0.4312  elapsed=218ms
+```
+
+Loop over the full folder (bash):
+
+```bash
+for f in /path/to/TSB-AD-M/*.csv; do
+    cargo run --release --example tsb_ad_m_eval -- "$f"
+done | tee vus_pr.log
+```
+
+The example uses `DynamicForest<128>` with a 50 % calibration / 50 % scoring split. Swap in `MatrixProfile` or your own detector by editing `core/examples/tsb_ad_m_eval.rs`.
 
 ## License
 
