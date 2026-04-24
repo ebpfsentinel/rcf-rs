@@ -90,6 +90,32 @@ fn bench_score_for<const D: usize>(
     });
 }
 
+/// Per-packet `score_trimmed` — exercises the thread-local
+/// scratch buffer path that replaced the per-call `Vec::with_capacity`
+/// heap allocation. Keeps an eye on any regression in that alloc
+/// elision.
+fn bench_score_trimmed_for<const D: usize>(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    num_trees: usize,
+    sample_size: usize,
+) {
+    let id = format!("{num_trees}t_{sample_size}s_{D}d");
+    group.bench_function(&id, |b| {
+        let forest = build_warm_forest::<D>(num_trees, sample_size, 2026);
+        let mut rng = ChaCha8Rng::seed_from_u64(19);
+        b.iter(|| {
+            let mut p = [0.0_f64; D];
+            for slot in &mut p {
+                *slot = <ChaCha8Rng as rand::Rng>::random::<f64>(&mut rng);
+            }
+            let s = forest
+                .score_trimmed(black_box(&p), 0.1)
+                .expect("score_trimmed succeeds");
+            black_box(s);
+        });
+    });
+}
+
 fn bench_attribution_for<const D: usize>(
     group: &mut BenchmarkGroup<'_, WallTime>,
     num_trees: usize,
@@ -137,6 +163,13 @@ fn bench_attribution(c: &mut Criterion) {
     bench_attribution_for::<4>(&mut group, 100, 256);
     bench_attribution_for::<16>(&mut group, 100, 256);
     bench_attribution_for::<64>(&mut group, 100, 256);
+    group.finish();
+}
+
+fn bench_score_trimmed(c: &mut Criterion) {
+    let mut group = c.benchmark_group("forest_score_trimmed");
+    bench_score_trimmed_for::<16>(&mut group, 100, 256);
+    bench_score_trimmed_for::<64>(&mut group, 100, 256);
     group.finish();
 }
 
@@ -270,6 +303,7 @@ criterion_group!(
     benches,
     bench_insert,
     bench_score,
+    bench_score_trimmed,
     bench_attribution,
     bench_combined,
     bench_codisp

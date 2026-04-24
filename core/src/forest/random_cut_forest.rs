@@ -38,6 +38,19 @@ use crate::visitor::{AttributionVisitor, ScalarScoreVisitor, ScoreAttributionVis
 /// seeded once at construction from the master forest seed.
 type TreeSlot<const D: usize> = (RandomCutTree<D>, ReservoirSampler, ChaCha8Rng);
 
+#[cfg(feature = "std")]
+std::thread_local! {
+    /// Reusable per-tree score buffer for
+    /// [`RandomCutForest::score_trimmed`]. Kept thread-local so
+    /// per-packet scoring on hot paths does not allocate — every
+    /// call `.clear()`s the existing buffer and reuses its capacity.
+    /// The buffer is untyped (`f64`) and not tied to `D`, so a
+    /// single-thread application driving forests of different `D`
+    /// sizes shares one backing allocation.
+    static TRIMMED_SCRATCH: core::cell::RefCell<Vec<f64>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
 /// Random Cut Forest aggregate over `D`-dimensional points.
 ///
 /// # Examples
@@ -758,7 +771,36 @@ impl<const D: usize> RandomCutForest<D> {
         let scaled = self.scale_point_copy(point);
         let probe: &[f64; D] = &scaled;
 
-        let mut samples: Vec<f64> = Vec::with_capacity(self.trees.len());
+        // Under `std` we reuse a thread-local scratch buffer so
+        // per-call scoring on a per-packet hot path does not
+        // allocate; under `no_std` we fall back to a fresh `Vec`.
+        #[cfg(feature = "std")]
+        let score = {
+            TRIMMED_SCRATCH.with(|cell| -> RcfResult<AnomalyScore> {
+                let mut samples = cell.borrow_mut();
+                samples.clear();
+                samples.reserve(self.trees.len());
+                self.collect_trimmed_samples(probe, &mut samples)?;
+                Self::reduce_trimmed(&mut samples, trim_fraction)
+            })?
+        };
+        #[cfg(not(feature = "std"))]
+        let score = {
+            let mut samples: Vec<f64> = Vec::with_capacity(self.trees.len());
+            self.collect_trimmed_samples(probe, &mut samples)?;
+            Self::reduce_trimmed(&mut samples, trim_fraction)?
+        };
+
+        #[cfg(feature = "std")]
+        self.metrics
+            .observe_histogram(crate::metrics::names::SCORE_OBSERVATION, f64::from(score));
+        Ok(score)
+    }
+
+    /// Walk every tree once and push the per-tree anomaly score
+    /// into `samples`. Factored out so both the TLS-scratch and
+    /// `no_std`-fallback paths share it.
+    fn collect_trimmed_samples(&self, probe: &[f64; D], samples: &mut Vec<f64>) -> RcfResult<()> {
         for (tree, _, _) in &self.trees {
             let Some(root) = tree.root() else {
                 continue;
@@ -768,10 +810,16 @@ impl<const D: usize> RandomCutForest<D> {
             let s = tree.traverse(probe, visitor)?;
             samples.push(f64::from(s));
         }
+        Ok(())
+    }
+
+    /// Sort, trim `trim_fraction` at each tail, and average the
+    /// remaining slice. Non-borrowing helper so the TLS-scratch
+    /// guard's lifetime stays tight.
+    fn reduce_trimmed(samples: &mut [f64], trim_fraction: f64) -> RcfResult<AnomalyScore> {
         if samples.is_empty() {
             return Err(RcfError::EmptyForest);
         }
-
         samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
         #[allow(
             clippy::cast_precision_loss,
@@ -789,11 +837,7 @@ impl<const D: usize> RandomCutForest<D> {
         let slice = &samples[lo..hi];
         #[allow(clippy::cast_precision_loss)]
         let mean = slice.iter().sum::<f64>() / slice.len() as f64;
-        let score = AnomalyScore::new(mean.max(0.0))?;
-        #[cfg(feature = "std")]
-        self.metrics
-            .observe_histogram(crate::metrics::names::SCORE_OBSERVATION, f64::from(score));
-        Ok(score)
+        AnomalyScore::new(mean.max(0.0))
     }
 
     /// Score `point` and attach a confidence interval derived from

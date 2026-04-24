@@ -32,6 +32,7 @@
 
 #![cfg(feature = "std")]
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use anomstream_core::error::{RcfError, RcfResult};
@@ -86,8 +87,12 @@ impl FeedbackLabel {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FeedbackStore<const D: usize> {
-    /// Labelled points in arrival order.
-    entries: Vec<LabelledPoint<D>>,
+    /// Labelled points in arrival order. `VecDeque` so that
+    /// oldest-first eviction on capacity pressure is `O(1)` — a
+    /// `Vec::remove(0)` would memmove the whole ring per label,
+    /// `O(capacity)` per call, at 512-cap that is a measurable
+    /// hot-path cost under sustained SOC labelling.
+    entries: VecDeque<LabelledPoint<D>>,
     /// Capacity ceiling; older entries get dropped once exceeded.
     capacity: usize,
     /// Gaussian kernel bandwidth on the L2 distance from the probe
@@ -126,7 +131,7 @@ impl<const D: usize> FeedbackStore<D> {
     #[must_use]
     pub fn default_store() -> Self {
         Self {
-            entries: Vec::with_capacity(DEFAULT_CAPACITY),
+            entries: VecDeque::with_capacity(DEFAULT_CAPACITY),
             capacity: DEFAULT_CAPACITY,
             sigma: DEFAULT_KERNEL_SIGMA,
             strength: DEFAULT_STRENGTH,
@@ -157,7 +162,7 @@ impl<const D: usize> FeedbackStore<D> {
             )));
         }
         Ok(Self {
-            entries: Vec::with_capacity(capacity),
+            entries: VecDeque::with_capacity(capacity),
             capacity,
             sigma,
             strength,
@@ -221,9 +226,9 @@ impl<const D: usize> FeedbackStore<D> {
             return Err(RcfError::NaNValue);
         }
         if self.entries.len() >= self.capacity {
-            self.entries.remove(0);
+            self.entries.pop_front();
         }
-        self.entries.push(LabelledPoint { point, label });
+        self.entries.push_back(LabelledPoint { point, label });
         self.metrics
             .inc_counter(names::FEEDBACK_LABELS_OBSERVED_TOTAL, 1);
         let sub = match label {

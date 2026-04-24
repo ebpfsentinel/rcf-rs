@@ -1222,6 +1222,28 @@ and every `.observe()` / `.update()` / `.record()` /
 verdict is `#[must_use = "…"]`. Drops in hot paths must use
 `let _ = detector.observe(x);` explicitly.
 
+### Hot-path allocation scrub
+
+Three hot-path sites are now alloc-free:
+
+- `FeedbackStore<D>` — label storage switched from `Vec` to
+  `VecDeque`. Oldest-first eviction on capacity pressure is
+  `O(1)` via `pop_front`; the old `Vec::remove(0)` memmoved the
+  full ring per label (`O(capacity)`), a measurable cost at the
+  default 512-cap under sustained SOC labelling.
+- `RandomCutForest::score_trimmed` — per-call `Vec::with_capacity`
+  scratch replaced by a `thread_local!` `RefCell<Vec<f64>>`
+  reused across calls. Per-packet scoring on an NDR hot path no
+  longer allocates. Falls back to a fresh `Vec` under `no_std`
+  where `thread_local!` is unavailable.
+- `LshAlertClusterer::hash_divector` / `observe` — bucket key
+  changed from a `format!`-built hex `String` to a `u128`
+  FNV-1a fold of the per-dim quantised buckets. Measured:
+  hash_divector 430 ns → 73 ns (−82 %), observe 480 ns → 95 ns
+  (−80 %). Zero heap allocations per-alert on the MSSP hot
+  path. Breaking API: `observe` now returns `(u128,
+  LshClusterDecision)` and `cluster_size` takes `u128` by value.
+
 ### Allocation caps (DoS hardening)
 
 Caller-supplied sizing parameters on types that allocate

@@ -48,12 +48,15 @@ pub enum LshClusterDecision {
 }
 
 /// Quantise-and-bucket alert clusterer. Thread-`Send` / `Sync`
-/// friendly — holds a `HashMap<String, u64>` counter keyed by the
-/// quantised hash.
+/// friendly — holds a `HashMap<u128, u64>` counter keyed by the
+/// quantised hash. The per-alert hash key is a packed integer,
+/// not a heap-allocated string: at MSSP volumes the `format!` of
+/// a per-dim hex string was a measurable per-observe heap trip,
+/// the `u128` key avoids the allocation entirely.
 #[derive(Debug, Clone)]
 pub struct LshAlertClusterer {
     /// Per-hash count of alerts merged into the cluster.
-    buckets: HashMap<String, u64>,
+    buckets: HashMap<u128, u64>,
     /// Number of buckets to quantise each per-dim attribution
     /// into. 16 is typical; higher → more clusters, less merging.
     buckets_per_dim: usize,
@@ -145,7 +148,7 @@ impl LshAlertClusterer {
     pub fn observe<K, const D: usize>(
         &mut self,
         record: &AlertRecord<K, D>,
-    ) -> (String, LshClusterDecision)
+    ) -> (u128, LshClusterDecision)
     where
         K: Clone,
     {
@@ -153,7 +156,7 @@ impl LshAlertClusterer {
         self.observed_total = self.observed_total.saturating_add(1);
         self.metrics
             .inc_counter(names::LSH_ALERTS_OBSERVED_TOTAL, 1);
-        let entry = self.buckets.entry(hash.clone()).or_insert(0);
+        let entry = self.buckets.entry(hash).or_insert(0);
         let is_new = *entry == 0;
         *entry = entry.saturating_add(1);
         let decision = if is_new {
@@ -174,33 +177,39 @@ impl LshAlertClusterer {
 
     /// LSH hash of a [`DiVector`]: per-dim signed attribution
     /// (`high - low`) quantised into `buckets_per_dim` buckets on
-    /// `[-attr_cap, +attr_cap]`, concatenated as a fixed-length
-    /// hex string.
+    /// `[-attr_cap, +attr_cap]`, folded into a `u128` via FNV-1a.
     ///
-    /// Similar alerts hash to the same string because every dim's
-    /// signed attribution falls in the same bucket modulo the
-    /// quantisation step.
+    /// Similar alerts hash to the same key because every dim's
+    /// signed attribution falls in the same quantisation bucket.
+    /// Switched from a per-dim hex `String` to a fixed-size
+    /// integer key to drop the per-observe heap allocation.
     #[must_use]
-    pub fn hash_divector(&self, di: &DiVector) -> String {
+    pub fn hash_divector(&self, di: &DiVector) -> u128 {
+        // FNV-1a over the per-dim quantised bucket indices,
+        // plus a per-dim tag so two different `(dim, bucket)`
+        // pairs cannot alias via offset.
+        const FNV_OFFSET: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+        const FNV_PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+        let mut h = FNV_OFFSET;
         let dims = di.dim();
-        let mut out = String::with_capacity(dims.saturating_mul(2));
         for d in 0..dims {
             let signed = di.high()[d] - di.low()[d];
-            let bucket = self.quantise(signed);
-            if self.buckets_per_dim <= 16 {
-                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{bucket:x}"));
-            } else {
-                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{bucket:02x}"));
-            }
+            let bucket = u128::from(self.quantise(signed));
+            // Mix in the dim index so `(d=0, b=3)` and
+            // `(d=1, b=3)` produce distinct contributions.
+            h ^= u128::from(d as u64).wrapping_mul(FNV_PRIME);
+            h = h.wrapping_mul(FNV_PRIME);
+            h ^= bucket;
+            h = h.wrapping_mul(FNV_PRIME);
         }
-        out
+        h
     }
 
     /// Count of alerts merged into the cluster keyed by `hash`.
     /// `0` when the hash has never been observed.
     #[must_use]
-    pub fn cluster_size(&self, hash: &str) -> u64 {
-        self.buckets.get(hash).copied().unwrap_or(0)
+    pub fn cluster_size(&self, hash: u128) -> u64 {
+        self.buckets.get(&hash).copied().unwrap_or(0)
     }
 
     /// Distinct active cluster hashes.
@@ -306,7 +315,7 @@ mod tests {
         assert_eq!(h1, h2);
         assert_eq!(d1, LshClusterDecision::NewCluster);
         assert_eq!(d2, LshClusterDecision::Joined);
-        assert_eq!(c.cluster_size(&h1), 2);
+        assert_eq!(c.cluster_size(h1), 2);
     }
 
     #[test]
@@ -323,12 +332,17 @@ mod tests {
     }
 
     #[test]
-    fn hash_length_matches_dim() {
+    fn hash_is_deterministic_and_distinct_across_dims() {
         let c = LshAlertClusterer::new(16, 4.0).unwrap();
-        let di = DiVector::zeros(8);
-        let h = c.hash_divector(&di);
-        // 16 buckets → 1 hex char per dim → dim 8 → 8 chars.
-        assert_eq!(h.len(), 8);
+        let di_a = DiVector::zeros(8);
+        let h_a1 = c.hash_divector(&di_a);
+        let h_a2 = c.hash_divector(&di_a);
+        assert_eq!(h_a1, h_a2, "hash must be deterministic");
+
+        let mut di_b = DiVector::zeros(8);
+        di_b.add_high(2, 3.0).unwrap();
+        let h_b = c.hash_divector(&di_b);
+        assert_ne!(h_a1, h_b, "distinct buckets must produce distinct hashes");
     }
 
     #[test]

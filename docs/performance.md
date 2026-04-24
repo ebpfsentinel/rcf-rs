@@ -297,8 +297,8 @@ the score stream instead.
 
 | Workload                                    | Time    | Throughput |
 | ------------------------------------------- | ------- | ---------- |
-| `LshAlertClusterer::hash_divector` D=16     | 430 ns  | ~2.3 M/s   |
-| `LshAlertClusterer::observe` D=16           | 485 ns  | ~2.1 M/s   |
+| `LshAlertClusterer::hash_divector` D=16     | 73 ns   | ~13.7 M/s  |
+| `LshAlertClusterer::observe` D=16           | 95 ns   | ~10.5 M/s  |
 | `AlertClusterer::observe` D=16 window=32    | 771 ns  | ~1.3 M/s   |
 | `PotDetector::record` post-freeze           | 43 ns   | ~23 M/s    |
 | `PotDetector::p_value` post-freeze          | 8.2 ns  | ~122 M/s   |
@@ -311,10 +311,14 @@ the score stream instead.
 | `FeedbackStore::adjust` 512 labels, D=16    | 8.6 µs  | ~116 k/s   |
 
 - **LSH clustering**: `observe` = `hash_divector` + HashMap
-  bucket increment. Hash dominates (430 ns of 485 ns).
-- **Cosine `AlertClusterer`** 1.6× slower than LSH at window=32;
-  scan cost grows linearly with window size vs O(1) bucket lookup
-  for LSH. Prefer LSH at MSSP volume (>10k alerts/min).
+  bucket increment. After the `String` → `u128` FNV-1a fold
+  swap, `hash_divector` is 73 ns (−82 % vs the prior
+  format-built hex string) and `observe` is 95 ns (−80 %).
+  Zero heap allocations per alert.
+- **Cosine `AlertClusterer`** now ~8× slower than LSH at
+  window=32; scan cost grows linearly with window size vs O(1)
+  bucket lookup for LSH. Prefer LSH at MSSP volume (>10k
+  alerts/min).
 - **SPOT p_value** is ~5× faster than `record`: recording
   updates the tdigest + Welford peak stats; querying is a
   closed-form GPD survival on cached γ, σ.
