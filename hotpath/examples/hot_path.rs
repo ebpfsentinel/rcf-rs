@@ -22,7 +22,7 @@ use std::thread;
 use std::time::Duration;
 
 use anomstream_core::ForestBuilder;
-use anomstream_hotpath::{UpdateSampler, channel};
+use anomstream_hotpath::{UpdateSampler, update_channel};
 
 const D: usize = 16;
 
@@ -38,7 +38,7 @@ fn main() {
     // with the flow 5-tuple hash; same flow always samples the
     // same way so baseline coverage stays uniform per-flow.
     let sampler = Arc::new(UpdateSampler::new(8));
-    let (producer, consumer) = channel::<D>(4096);
+    let (producer, consumer) = update_channel::<D>(4096);
 
     // Shutdown flag so the updater thread exits cleanly once the
     // classifier has finished producing.

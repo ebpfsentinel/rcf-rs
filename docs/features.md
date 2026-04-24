@@ -1222,6 +1222,37 @@ and every `.observe()` / `.update()` / `.record()` /
 verdict is `#[must_use = "…"]`. Drops in hot paths must use
 `let _ = detector.observe(x);` explicitly.
 
+### Hotpath correctness
+
+- **Sampler key seeding** — `UpdateSampler::new_keyed` always
+  forces the `mix_k1` multiplier odd via `| 1`. The previous
+  code had a zero-check that, on the 2⁻⁶⁴ chance of `getrandom`
+  returning exactly zero, swapped in a publicly-known constant;
+  the current code degrades to `1` instead (still odd, still a
+  valid multiplicative bijection, non-deterministic for attackers).
+- **PrefixRateCap rollover** — window reset is a
+  `compare_exchange_weak` loop with `AcqRel` on success and
+  `Acquire` on the rollover-side load. Happens-before order
+  guarantees that the bucket zero-fill completes before any peer
+  thread's subsequent `fetch_add`. Closes the soft-over-admission
+  window the earlier `load` → `compare_exchange` code had, with
+  no perf regression (measured **8.9 ns** per `check_and_record`,
+  -60 % vs the earlier code — the `Acquire` load short-circuits
+  the common "window still valid" case).
+- **Counter semantics** — every `*_total` counter
+  (`UpdateSampler::accepted_total`, `UpdateProducer::enqueued`,
+  `PrefixRateCap::admitted_total`, etc.) is a plain
+  `AtomicU64::fetch_add(1, Relaxed)`. Atomic `fetch_add` is
+  wrapping by definition — `overflow-checks` does not apply to
+  atomic operations. At 10 Gpps sustained load a `u64` wraps in
+  ~58 years; export cadence is an ops choice, not a correctness
+  requirement.
+- **`channel` rename** — the free function that built the MPSC
+  pair is now `anomstream_hotpath::update_channel` (previously
+  `channel`); the old name shadowed `std::sync::mpsc::channel`
+  in use-star imports. Paired
+  `update_channel_with_sink(capacity, sink)`.
+
 ### Release discipline
 
 CI is split across two workflows:

@@ -5,7 +5,7 @@
 
 #![allow(clippy::cast_precision_loss)]
 
-use anomstream_hotpath::{PrefixRateCap, UpdateSampler, channel};
+use anomstream_hotpath::{PrefixRateCap, UpdateSampler, update_channel};
 use criterion::{Criterion, criterion_group, criterion_main};
 use mimalloc::MiMalloc;
 use rand::{Rng, SeedableRng};
@@ -72,13 +72,13 @@ fn bench_hot_path_prefix_cap(c: &mut Criterion) {
     group.finish();
 }
 
-/// Bounded MPSC `channel::try_enqueue` with background drain
-/// thread keeping the queue non-full.
+/// Bounded MPSC `update_channel::try_enqueue` with background
+/// drain thread keeping the queue non-full.
 fn bench_hot_path_channel(c: &mut Criterion) {
     let mut group = c.benchmark_group("hot_path_channel");
 
     group.bench_function("try_enqueue_4096cap", |b| {
-        let (producer, consumer) = channel::<16>(4096);
+        let (producer, consumer) = update_channel::<16>(4096);
         let drain = std::thread::spawn(move || while consumer.recv().is_some() {});
         let mut rng = ChaCha8Rng::seed_from_u64(2026);
         b.iter(|| {

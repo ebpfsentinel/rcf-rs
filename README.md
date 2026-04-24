@@ -82,7 +82,7 @@ The Random Cut Forest implementation inside the toolkit is a focused port of the
 
 **Hot-path ingress**
 
-- `hot_path::UpdateSampler` / `PrefixRateCap` / `channel` — stride - hash + keyed sampler, 256-bucket atomic counter sketch, bounded MPSC channel for classifier/updater thread split
+- `hot_path::UpdateSampler` / `PrefixRateCap` / `update_channel` — stride - hash + keyed sampler, 256-bucket atomic counter sketch, bounded MPSC channel for classifier/updater thread split
 - `MetricsSink` — pluggable telemetry (`NoopSink` + your own impl)
 
 **Evaluation**
@@ -230,7 +230,7 @@ wired in" deployment or cherry-pick layers explicitly.
 | `ShingledForest`, `DynamicForest`, `DriftAwareForest`, `TenantForestPool`, `MatrixProfile` | `std`                  |
 | `TsbAdMDataset`, `vus_pr` / `range_auc_pr`      | `std`                  |
 | `AlertClusterer`, `AlertRecord`, `FeedbackStore`, `PlattCalibrator`, `SageEstimator`, `LshAlertClusterer` | `triage` (+ `std`) |
-| `UpdateSampler`, `PrefixRateCap`, `channel`, `MetricsSink` | `hotpath` (+ `std`)    |
+| `UpdateSampler`, `PrefixRateCap`, `update_channel`, `MetricsSink` | `hotpath` (+ `std`)    |
 
 ### `no_std` + `alloc`
 

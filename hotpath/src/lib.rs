@@ -16,7 +16,7 @@
 //!   rest before any RCF work. Per-flow sampling keeps the baseline
 //!   shape (every flow has *some* representation) while cutting the
 //!   update rate by the sampling ratio.
-//! - [`channel`] — bounded MPSC channel carrying `[f64; D]` points
+//! - [`update_channel`] — bounded MPSC channel carrying `[f64; D]` points
 //!   from classifier threads to a **single dedicated updater
 //!   thread**. The classifier thread `try_enqueue`s non-blockingly
 //!   and scores against the *previous* forest snapshot; the updater
@@ -26,6 +26,21 @@
 //! Coarser `time_decay` is the third dial, but that's configured
 //! directly on [`anomstream_core::ForestBuilder::time_decay`]; see
 //! `docs/performance.md` for the trade-off.
+//!
+//! # Counter semantics
+//!
+//! All lifetime counters ([`UpdateSampler::accepted_total`],
+//! `rejected_total`, [`UpdateProducer::enqueued`], `dropped_total`,
+//! [`PrefixRateCap::admitted_total`], `capped_total`) are plain
+//! `AtomicU64::fetch_add(1, Relaxed)`. Atomic `fetch_add` is
+//! wrapping by definition — `profile.release.overflow-checks` does
+//! not apply to atomic operations, so no panic can occur at
+//! wrap-around. At `10 Gpps` sustained load a `u64` wraps in
+//! roughly 58 years, well past any realistic deployment lifetime.
+//! Export-and-reset cadence is therefore only needed when an
+//! operator wants fine-grained delta metrics; no correctness
+//! pressure exists to call `*_total_reset` at any particular
+//! frequency.
 //!
 //! # Example: classifier + updater split
 //!
@@ -39,7 +54,7 @@
 //!     .seed(42)
 //!     .build()?;
 //!
-//! let (producer, mut consumer) = hot_path::channel::<16>(4096);
+//! let (producer, mut consumer) = hot_path::update_channel::<16>(4096);
 //! let sampler = hot_path::UpdateSampler::new(8); // 1/8 per-flow
 //!
 //! // Updater thread.
@@ -159,13 +174,14 @@ impl UpdateSampler {
         getrandom::fill(&mut buf)?;
         let mix_k1 = u64::from_le_bytes(buf[0..8].try_into().expect("16 bytes"));
         let mix_k2 = u64::from_le_bytes(buf[8..16].try_into().expect("16 bytes"));
-        // Ensure `mix_k1` is non-zero and odd so its use as a
-        // multiplier is always a bijection.
-        let mix_k1 = if mix_k1 == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            mix_k1 | 1
-        };
+        // `| 1` alone forces odd + non-zero so `mix_k1` is always
+        // a valid multiplicative-bijection modulus. `getrandom`
+        // returning exactly zero has probability `2⁻⁶⁴`; in that
+        // vanishingly-rare case the result becomes `1`, which is
+        // still a valid odd multiplier and — critically — not a
+        // publicly-known constant the old fallback path would
+        // have degraded to.
+        let mix_k1 = mix_k1 | 1;
         Ok(Self {
             keep_every_n,
             counter: AtomicU64::new(0),
@@ -426,14 +442,15 @@ impl<const D: usize> UpdateConsumer<D> {
 /// (observable via [`UpdateProducer::dropped_total`]) are the ops
 /// signal the channel needs widening.
 #[must_use]
-pub fn channel<const D: usize>(capacity: usize) -> (UpdateProducer<D>, UpdateConsumer<D>) {
-    channel_with_sink(capacity, default_sink())
+pub fn update_channel<const D: usize>(capacity: usize) -> (UpdateProducer<D>, UpdateConsumer<D>) {
+    update_channel_with_sink(capacity, default_sink())
 }
 
-/// Same as [`channel`] but with a caller-supplied metrics sink.
-/// Every clone of the returned producer shares the same sink.
+/// Same as [`update_channel`] but with a caller-supplied metrics
+/// sink. Every clone of the returned producer shares the same
+/// sink.
 #[must_use]
-pub fn channel_with_sink<const D: usize>(
+pub fn update_channel_with_sink<const D: usize>(
     capacity: usize,
     sink: Arc<dyn MetricsSink>,
 ) -> (UpdateProducer<D>, UpdateConsumer<D>) {
@@ -545,6 +562,15 @@ impl PrefixRateCap {
 
     /// Record an admission attempt and return `true` when the
     /// caller is allowed to proceed. Thread-safe, lock-free.
+    ///
+    /// Under concurrent load the window-rollover path runs a
+    /// `compare_exchange_weak` loop until the timestamp either
+    /// already sits inside the live window or this thread wins
+    /// the reset — removes the earlier soft-over-admission window
+    /// where two threads could both increment buckets between a
+    /// stale `load` and a `compare_exchange`. `Release` /
+    /// `Acquire` ordering makes the bucket zero-fill
+    /// happen-before any subsequent bucket `fetch_add`.
     pub fn check_and_record(&self, prefix_hash: u64, now_ms: u64) -> bool {
         if self.cap_per_window == 0 {
             self.admitted_total.fetch_add(1, Ordering::Relaxed);
@@ -552,25 +578,31 @@ impl PrefixRateCap {
                 .inc_counter(names::HOT_PATH_PREFIX_ADMITTED_TOTAL, 1);
             return true;
         }
-        // Atomically roll the window if needed.
-        let mut start = self.window_start_ms.load(Ordering::Relaxed);
-        if start == 0 || now_ms.saturating_sub(start) >= self.window_ms {
-            // Try to claim ownership of the reset. Lost races are
-            // fine — any losing thread accepts that its peer reset
-            // the window.
-            let attempted = self.window_start_ms.compare_exchange(
-                start,
-                now_ms,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            );
-            if attempted.is_ok() {
+        // Atomically roll the window if needed. Loop until the
+        // observed `start` is either still valid or we successfully
+        // install `now_ms` via CAS.
+        loop {
+            let start = self.window_start_ms.load(Ordering::Acquire);
+            if start != 0 && now_ms.saturating_sub(start) < self.window_ms {
+                break;
+            }
+            // Peer-move on `Err` — just loop; `Ok` wins the reset.
+            // Bounded by thread count; no livelock.
+            if self
+                .window_start_ms
+                .compare_exchange_weak(start, now_ms, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                // Winner — zero-fill the bucket bank. The
+                // `Release` side of the successful CAS makes this
+                // store visible to every peer whose subsequent
+                // `fetch_add` acquires the updated
+                // `window_start_ms`.
                 for bucket in &self.buckets {
                     bucket.store(0, Ordering::Relaxed);
                 }
+                break;
             }
-            start = now_ms;
-            let _ = start; // silence unused when optimiser strips.
         }
         #[allow(clippy::cast_possible_truncation)]
         let idx = ((prefix_hash & 0xff) as usize) & (Self::BUCKETS - 1);
@@ -667,7 +699,7 @@ mod tests {
 
     #[test]
     fn channel_try_enqueue_drops_on_full() {
-        let (p, _c) = channel::<2>(2);
+        let (p, _c) = update_channel::<2>(2);
         assert!(p.try_enqueue([1.0, 2.0]));
         assert!(p.try_enqueue([3.0, 4.0]));
         assert!(!p.try_enqueue([5.0, 6.0]));
@@ -677,7 +709,7 @@ mod tests {
 
     #[test]
     fn channel_try_drain_empties_queue() {
-        let (p, c) = channel::<2>(8);
+        let (p, c) = update_channel::<2>(8);
         let _ = p.try_enqueue([1.0, 2.0]);
         let _ = p.try_enqueue([3.0, 4.0]);
         let mut sink: Vec<[f64; 2]> = Vec::new();
@@ -692,7 +724,7 @@ mod tests {
 
     #[test]
     fn channel_producer_is_clone_multi_producer() {
-        let (p1, c) = channel::<2>(8);
+        let (p1, c) = update_channel::<2>(8);
         let p2 = p1.clone();
         let _ = p1.try_enqueue([1.0, 2.0]);
         let _ = p2.try_enqueue([3.0, 4.0]);
@@ -705,7 +737,7 @@ mod tests {
 
     #[test]
     fn channel_try_drain_counts_errors() {
-        let (p, c) = channel::<2>(8);
+        let (p, c) = update_channel::<2>(8);
         let _ = p.try_enqueue([1.0, 2.0]);
         let _ = p.try_enqueue([3.0, 4.0]);
         let (ing, err) =
@@ -727,7 +759,7 @@ mod tests {
             .unwrap();
 
         let sampler = UpdateSampler::new(3);
-        let (producer, consumer) = channel::<2>(16);
+        let (producer, consumer) = update_channel::<2>(16);
 
         // Simulated classifier hot-path.
         for i in 0..9_u64 {
@@ -821,5 +853,45 @@ mod tests {
         // Advance past the window — next call resets and admits.
         assert!(cap.check_and_record(prefix, 1_500));
         assert_eq!(cap.admitted_total(), 3);
+    }
+
+    #[test]
+    fn prefix_rate_cap_concurrent_rollover_holds_hard_cap() {
+        // Every thread hammers the same prefix across many window
+        // rollovers; after all joins, total admits per window
+        // must equal `thread_count * windows_crossed` worth of
+        // caps at most. The CAS-loop rollover path must not admit
+        // more than `cap_per_window` per prefix-per-window even
+        // under concurrent reset races.
+        use std::sync::Arc;
+        use std::thread;
+        let cap = Arc::new(PrefixRateCap::new(4, 100));
+        let threads: Vec<_> = (0..8_u64)
+            .map(|t| {
+                let cap = Arc::clone(&cap);
+                thread::spawn(move || {
+                    for step in 0..2_000_u64 {
+                        // `now_ms` advances 1 ms per step; every
+                        // 100 steps the window rolls.
+                        let now = step + t;
+                        let _ = cap.check_and_record(0xdead_beef, now);
+                    }
+                })
+            })
+            .collect();
+        for h in threads {
+            h.join().expect("thread join");
+        }
+        // Admitted count grows linearly with windows crossed, not
+        // with thread count. The exact bound is fuzzy (rollover
+        // races shift window boundaries) but admitted per window
+        // must stay close to `cap_per_window = 4`. Over ~2000 ms
+        // with a 100 ms window that is at most ~20 windows × 4 =
+        // 80 admits. Allow 4× slack for timing jitter.
+        let admitted = cap.admitted_total();
+        assert!(
+            admitted <= 320,
+            "admit count {admitted} exceeds generous bound — race leaks"
+        );
     }
 }

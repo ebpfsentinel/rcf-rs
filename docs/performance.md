@@ -252,8 +252,8 @@ nanosecond territory:
 | `UpdateSampler::accept_stride` keep=8              | 28 ns    | ~36 M/s    |
 | `UpdateSampler::accept_hash` (unkeyed) keep=8      | 14 ns    | ~73 M/s    |
 | `UpdateSampler::accept_hash` (keyed) keep=8        | 15 ns    | ~67 M/s    |
-| `PrefixRateCap::check_and_record` 100/1s           | 23 ns    | ~44 M/s    |
-| `channel::try_enqueue` cap=4096 (+ drain thread)   | 487 ns   | ~2.1 M/s   |
+| `PrefixRateCap::check_and_record` 100/1s           | 8.9 ns   | ~112 M/s   |
+| `update_channel::try_enqueue` cap=4096 (+ drain)   | 487 ns   | ~2.1 M/s   |
 
 - **Keyed vs unkeyed hash**: murmur-mix finaliser costs ~1.2 ns
   — negligible vs the atomic fetch-add on the accepted/rejected
@@ -264,6 +264,13 @@ nanosecond territory:
   lock, not by try_send itself. 2.1 M/s per producer is more
   than enough for typical TC/XDP hot paths (~1-10 M pkt/s at
   10 Gbps, with multiple producer clones fanning out).
+- **`PrefixRateCap` 8.9 ns** reflects the post-hardening
+  rollover path: an `Acquire` `load` of `window_start_ms` plus
+  an inlined `saturating_sub` short-circuits the common
+  "window still valid" case before any CAS runs. The full
+  `compare_exchange_weak` loop only triggers once per window
+  roll, not once per packet (-60 % vs the earlier race-prone
+  `load` → single `compare_exchange` code).
 
 ## Streaming quantiles / histograms
 

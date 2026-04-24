@@ -24,7 +24,7 @@ use std::thread;
 use std::time::Duration;
 
 use anomstream_core::ForestBuilder;
-use anomstream_hotpath::{UpdateSampler, channel};
+use anomstream_hotpath::{UpdateSampler, update_channel};
 
 const D: usize = 8;
 
@@ -38,7 +38,7 @@ fn classifier_producer_updater_consumer_roundtrip() {
         .unwrap();
 
     let sampler = Arc::new(UpdateSampler::new(4));
-    let (producer, consumer) = channel::<D>(1024);
+    let (producer, consumer) = update_channel::<D>(1024);
     // Hold a local clone so we can read `dropped_total()` after
     // classifier threads have dropped their handles — counters are
     // shared across clones via `Arc<AtomicU64>`.
@@ -128,7 +128,7 @@ fn sampler_accept_hash_is_deterministic_across_clones() {
 
 #[test]
 fn channel_drop_on_full_increments_counter() {
-    let (p, _c) = channel::<2>(2);
+    let (p, _c) = update_channel::<2>(2);
     assert!(p.try_enqueue([1.0, 2.0]));
     assert!(p.try_enqueue([3.0, 4.0]));
     // Queue full — both of these must drop.
