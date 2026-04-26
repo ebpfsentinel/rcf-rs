@@ -108,11 +108,6 @@ jobs:
   minimal-versions:
     name: minimal-versions (nightly -Z minimal-versions)
     runs-on: ubuntu-latest
-    # `rust-toolchain.toml` pins `channel = "stable"`, which rustup
-    # honours at every cargo invocation and would override the
-    # nightly installed by `dtolnay/rust-toolchain@nightly`. Setting
-    # `RUSTUP_TOOLCHAIN` at job level shadows the toml so every
-    # cargo command in this job runs under nightly.
     env:
       RUSTUP_TOOLCHAIN: nightly
     steps:
