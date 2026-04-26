@@ -31,6 +31,38 @@
 //! Both encodings preserve the per-point dimensionality `D` at the
 //! type level — callers must deserialise into a type with the same
 //! compile-time `D` that produced the payload.
+//!
+//! # Security
+//!
+//! These deserialisers are designed for **trusted checkpoints**:
+//! payloads produced by an earlier process you control, stored on
+//! a filesystem you control, and reloaded at warm-restart time. The
+//! `postcard` and `serde_json` decoders accept any well-formed
+//! payload that matches the schema — they perform no integrity check
+//! beyond the 4-byte version prefix and have no built-in cap on
+//! recursion depth, so a deliberately malformed payload could in
+//! principle drive an out-of-memory or stack-overflow condition.
+//!
+//! The current [`RandomCutForest`] / [`ThresholdedForest`] schema is
+//! arena-backed (flat `Vec<InternalData>` / `Vec<LeafData>`, no
+//! recursive type nesting) so the recursion-depth attack surface is
+//! limited in practice — but pretending the format is hostile-input-
+//! safe would be wrong. Defence-in-depth measures shipped here:
+//!
+//! - [`MAX_DESERIALIZE_BYTES`] / [`MAX_JSON_BYTES`] caps reject
+//!   absurdly large payloads up front (configurable per call via the
+//!   `*_with_max_size` variants).
+//! - The 4-byte version prefix is checked **before** any third-party
+//!   decoder runs against the bytes.
+//! - All deserialisers return a typed error rather than panicking
+//!   on truncated, mismatched, or malformed input.
+//!
+//! For checkpoints sourced from outside the process boundary
+//! (network sync, multi-tenant restore endpoints, partner-supplied
+//! state), pair these helpers with an out-of-band integrity check
+//! (HMAC, signature, or transport-level TLS+auth) before calling
+//! `from_bytes` / `from_path` / `from_json` / `from_json_path`. Do
+//! **not** feed unauthenticated bytes from a hostile source.
 
 #[cfg(any(feature = "postcard", feature = "serde_json"))]
 use crate::error::{RcfError, RcfResult};
@@ -56,6 +88,35 @@ pub const THRESHOLDED_PERSISTENCE_VERSION: u32 = 4;
 
 /// Number of bytes reserved for the version prefix.
 pub const VERSION_PREFIX_BYTES: usize = 4;
+
+/// Default upper bound on `postcard` payload size accepted by
+/// [`RandomCutForest::from_bytes`] / [`ThresholdedForest::from_bytes`].
+/// Sized for a typical `D` ≤ 64, `num_trees` ≤ 1000, `sample_size` ≤ 2048
+/// deployment with comfortable headroom; larger workloads (high-`D`
+/// detectors with extensive arenas) call the
+/// [`RandomCutForest::from_bytes_with_max_size`] /
+/// [`ThresholdedForest::from_bytes_with_max_size`] variants and pass
+/// an explicit cap.
+pub const MAX_DESERIALIZE_BYTES: usize = 256 * 1024 * 1024;
+
+/// Default upper bound on `serde_json` payload size accepted by
+/// [`RandomCutForest::from_json`] / [`ThresholdedForest::from_json`].
+/// JSON encodings are roughly 4× the binary equivalent (utf-8 floats,
+/// field-name overhead) so the cap is correspondingly larger.
+pub const MAX_JSON_BYTES: usize = 1024 * 1024 * 1024;
+
+/// Reject payloads above the supplied byte cap before handing the
+/// bytes to a third-party decoder.
+#[cfg(any(feature = "postcard", feature = "serde_json"))]
+fn enforce_size_cap(len: usize, max: usize, kind: &'static str) -> RcfResult<()> {
+    if len > max {
+        return Err(RcfError::DeserializationFailed(format!(
+            "{kind} payload {len} byte(s) exceeds cap {max} (caller-controlled OOM guard) — \
+             use the `*_with_max_size` variant to opt into a larger bound"
+        )));
+    }
+    Ok(())
+}
 
 /// Decode the first four bytes of `bytes` as the persistence version.
 ///
@@ -157,12 +218,46 @@ impl<const D: usize> RandomCutForest<D> {
     /// # Errors
     ///
     /// - [`RcfError::DeserializationFailed`] when the byte slice is
-    ///   too short to hold the version prefix or the `postcard`
-    ///   payload is malformed.
+    ///   too short to hold the version prefix, longer than
+    ///   [`MAX_DESERIALIZE_BYTES`], or the `postcard` payload is
+    ///   malformed.
     /// - [`RcfError::IncompatibleVersion`] when the embedded version
     ///   does not match [`PERSISTENCE_VERSION`].
+    ///
+    /// # Security
+    ///
+    /// Designed for trusted checkpoints — see the module-level
+    /// `# Security` section. The size cap defends against a
+    /// caller-controlled OOM at decode time; the version prefix
+    /// rejects schema drift before the third-party decoder runs.
+    /// Pair with an out-of-band integrity check (HMAC / signature /
+    /// authenticated transport) when bytes originate outside the
+    /// process trust boundary. Use
+    /// [`Self::from_bytes_with_max_size`] when the deployment's
+    /// expected payload exceeds [`MAX_DESERIALIZE_BYTES`].
     #[cfg(feature = "postcard")]
     pub fn from_bytes(bytes: &[u8]) -> RcfResult<Self> {
+        Self::from_bytes_with_max_size(bytes, MAX_DESERIALIZE_BYTES)
+    }
+
+    /// Variant of [`Self::from_bytes`] that accepts a caller-supplied
+    /// byte-length cap. Use when a high-D / large-arena deployment's
+    /// snapshot legitimately exceeds [`MAX_DESERIALIZE_BYTES`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::from_bytes`] but the size check uses `max`
+    /// instead of [`MAX_DESERIALIZE_BYTES`].
+    ///
+    /// # Security
+    ///
+    /// Same trust model as [`Self::from_bytes`]. Setting `max` very
+    /// large (close to `usize::MAX`) effectively disables the OOM
+    /// guard — only do this on payloads that have already passed an
+    /// out-of-band integrity check.
+    #[cfg(feature = "postcard")]
+    pub fn from_bytes_with_max_size(bytes: &[u8], max: usize) -> RcfResult<Self> {
+        enforce_size_cap(bytes.len(), max, "RandomCutForest postcard")?;
         let version = read_version_prefix(bytes)?;
         if version != PERSISTENCE_VERSION {
             return Err(RcfError::IncompatibleVersion {
@@ -195,9 +290,17 @@ impl<const D: usize> RandomCutForest<D> {
     /// # Errors
     ///
     /// - [`RcfError::DeserializationFailed`] when the file cannot be
-    ///   read or the payload is malformed.
+    ///   read, exceeds [`MAX_DESERIALIZE_BYTES`], or the payload is
+    ///   malformed.
     /// - [`RcfError::IncompatibleVersion`] when the embedded version
     ///   does not match [`PERSISTENCE_VERSION`].
+    ///
+    /// # Security
+    ///
+    /// Inherits the trust model of [`Self::from_bytes`] — designed
+    /// for filesystem checkpoints written by a process the caller
+    /// controls. Hostile bytes on the path require an out-of-band
+    /// integrity check (HMAC / signature) before this call.
     #[cfg(all(feature = "postcard", feature = "std"))]
     pub fn from_path(path: impl AsRef<std::path::Path>) -> RcfResult<Self> {
         let bytes = atomic::read_all(path.as_ref())?;
@@ -224,11 +327,35 @@ impl<const D: usize> RandomCutForest<D> {
     ///
     /// # Errors
     ///
-    /// - [`RcfError::DeserializationFailed`] when the JSON is malformed.
+    /// - [`RcfError::DeserializationFailed`] when the JSON is
+    ///   malformed or longer than [`MAX_JSON_BYTES`].
     /// - [`RcfError::IncompatibleVersion`] when the embedded version
     ///   does not match [`PERSISTENCE_VERSION`].
+    ///
+    /// # Security
+    ///
+    /// See module-level `# Security` notes. Use
+    /// [`Self::from_json_with_max_size`] for legitimate payloads
+    /// above [`MAX_JSON_BYTES`].
     #[cfg(feature = "serde_json")]
     pub fn from_json(json: &str) -> RcfResult<Self> {
+        Self::from_json_with_max_size(json, MAX_JSON_BYTES)
+    }
+
+    /// Variant of [`Self::from_json`] with a caller-supplied
+    /// byte-length cap.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::from_json`] with `max` replacing
+    /// [`MAX_JSON_BYTES`].
+    ///
+    /// # Security
+    ///
+    /// See module-level `# Security` notes.
+    #[cfg(feature = "serde_json")]
+    pub fn from_json_with_max_size(json: &str, max: usize) -> RcfResult<Self> {
+        enforce_size_cap(json.len(), max, "RandomCutForest JSON")?;
         let envelope: JsonEnvelopeOwned<D> = serde_json::from_str(json)
             .map_err(|e| RcfError::DeserializationFailed(e.to_string()))?;
         if envelope.version != PERSISTENCE_VERSION {
@@ -258,9 +385,13 @@ impl<const D: usize> RandomCutForest<D> {
     /// # Errors
     ///
     /// - [`RcfError::DeserializationFailed`] when the file cannot be
-    ///   read or the JSON is malformed.
+    ///   read, exceeds [`MAX_JSON_BYTES`], or the JSON is malformed.
     /// - [`RcfError::IncompatibleVersion`] when the embedded version
     ///   does not match [`PERSISTENCE_VERSION`].
+    ///
+    /// # Security
+    ///
+    /// Inherits the trust model of [`Self::from_json`].
     #[cfg(all(feature = "serde_json", feature = "std"))]
     pub fn from_json_path(path: impl AsRef<std::path::Path>) -> RcfResult<Self> {
         let json = atomic::read_all_string(path.as_ref())?;
@@ -296,12 +427,37 @@ impl<const D: usize> ThresholdedForest<D> {
     /// # Errors
     ///
     /// - [`RcfError::DeserializationFailed`] when the byte slice is
-    ///   too short to hold the version prefix or the `postcard`
-    ///   payload is malformed.
+    ///   too short to hold the version prefix, longer than
+    ///   [`MAX_DESERIALIZE_BYTES`], or the `postcard` payload is
+    ///   malformed.
     /// - [`RcfError::IncompatibleVersion`] when the embedded version
     ///   does not match [`THRESHOLDED_PERSISTENCE_VERSION`].
+    ///
+    /// # Security
+    ///
+    /// Designed for trusted checkpoints — see the module-level
+    /// `# Security` section. Use [`Self::from_bytes_with_max_size`]
+    /// when the deployment's expected payload exceeds
+    /// [`MAX_DESERIALIZE_BYTES`].
     #[cfg(feature = "postcard")]
     pub fn from_bytes(bytes: &[u8]) -> RcfResult<Self> {
+        Self::from_bytes_with_max_size(bytes, MAX_DESERIALIZE_BYTES)
+    }
+
+    /// Variant of [`Self::from_bytes`] with a caller-supplied
+    /// byte-length cap.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::from_bytes`] with `max` replacing
+    /// [`MAX_DESERIALIZE_BYTES`].
+    ///
+    /// # Security
+    ///
+    /// See module-level `# Security` notes.
+    #[cfg(feature = "postcard")]
+    pub fn from_bytes_with_max_size(bytes: &[u8], max: usize) -> RcfResult<Self> {
+        enforce_size_cap(bytes.len(), max, "ThresholdedForest postcard")?;
         let version = read_version_prefix(bytes)?;
         if version != THRESHOLDED_PERSISTENCE_VERSION {
             return Err(RcfError::IncompatibleVersion {
@@ -332,9 +488,14 @@ impl<const D: usize> ThresholdedForest<D> {
     /// # Errors
     ///
     /// - [`RcfError::DeserializationFailed`] when the file cannot be
-    ///   read or the payload is malformed.
+    ///   read, exceeds [`MAX_DESERIALIZE_BYTES`], or the payload is
+    ///   malformed.
     /// - [`RcfError::IncompatibleVersion`] when the embedded version
     ///   does not match [`THRESHOLDED_PERSISTENCE_VERSION`].
+    ///
+    /// # Security
+    ///
+    /// Inherits the trust model of [`Self::from_bytes`].
     #[cfg(all(feature = "postcard", feature = "std"))]
     pub fn from_path(path: impl AsRef<std::path::Path>) -> RcfResult<Self> {
         let bytes = atomic::read_all(path.as_ref())?;
@@ -360,11 +521,33 @@ impl<const D: usize> ThresholdedForest<D> {
     ///
     /// # Errors
     ///
-    /// - [`RcfError::DeserializationFailed`] when the JSON is malformed.
+    /// - [`RcfError::DeserializationFailed`] when the JSON is
+    ///   malformed or longer than [`MAX_JSON_BYTES`].
     /// - [`RcfError::IncompatibleVersion`] when the embedded version
     ///   does not match [`THRESHOLDED_PERSISTENCE_VERSION`].
+    ///
+    /// # Security
+    ///
+    /// See module-level `# Security` notes.
     #[cfg(feature = "serde_json")]
     pub fn from_json(json: &str) -> RcfResult<Self> {
+        Self::from_json_with_max_size(json, MAX_JSON_BYTES)
+    }
+
+    /// Variant of [`Self::from_json`] with a caller-supplied
+    /// byte-length cap.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::from_json`] with `max` replacing
+    /// [`MAX_JSON_BYTES`].
+    ///
+    /// # Security
+    ///
+    /// See module-level `# Security` notes.
+    #[cfg(feature = "serde_json")]
+    pub fn from_json_with_max_size(json: &str, max: usize) -> RcfResult<Self> {
+        enforce_size_cap(json.len(), max, "ThresholdedForest JSON")?;
         let envelope: ThresholdedJsonEnvelopeOwned<D> = serde_json::from_str(json)
             .map_err(|e| RcfError::DeserializationFailed(e.to_string()))?;
         if envelope.version != THRESHOLDED_PERSISTENCE_VERSION {
@@ -393,9 +576,13 @@ impl<const D: usize> ThresholdedForest<D> {
     /// # Errors
     ///
     /// - [`RcfError::DeserializationFailed`] when the file cannot be
-    ///   read or the JSON is malformed.
+    ///   read, exceeds [`MAX_JSON_BYTES`], or the JSON is malformed.
     /// - [`RcfError::IncompatibleVersion`] when the embedded version
     ///   does not match [`THRESHOLDED_PERSISTENCE_VERSION`].
+    ///
+    /// # Security
+    ///
+    /// Inherits the trust model of [`Self::from_json`].
     #[cfg(all(feature = "serde_json", feature = "std"))]
     pub fn from_json_path(path: impl AsRef<std::path::Path>) -> RcfResult<Self> {
         let json = atomic::read_all_string(path.as_ref())?;
@@ -559,6 +746,40 @@ mod binary_tests {
     }
 
     #[test]
+    fn oversize_payload_rejected_by_default_cap() {
+        // Synthesise a payload larger than MAX_DESERIALIZE_BYTES
+        // by extending the version prefix with a tail of garbage.
+        // Real-world snapshots do not approach the cap; the test
+        // proves the cap fires before postcard sees the bytes.
+        let mut bytes = Vec::with_capacity(MAX_DESERIALIZE_BYTES + 16);
+        bytes.extend_from_slice(&PERSISTENCE_VERSION.to_le_bytes());
+        bytes.resize(MAX_DESERIALIZE_BYTES + 1, 0xAA);
+        let err = RandomCutForest::<2>::from_bytes(&bytes).unwrap_err();
+        assert!(matches!(err, RcfError::DeserializationFailed(_)));
+    }
+
+    #[test]
+    fn from_bytes_with_max_size_accepts_higher_cap() {
+        // A legitimate snapshot must round-trip through the
+        // explicit-cap variant exactly like the default path.
+        let f = trained_forest(7, 50);
+        let bytes = f.to_bytes().unwrap();
+        let back =
+            RandomCutForest::<2>::from_bytes_with_max_size(&bytes, MAX_DESERIALIZE_BYTES).unwrap();
+        assert_eq!(back.updates_seen(), f.updates_seen());
+    }
+
+    #[test]
+    fn from_bytes_with_max_size_rejects_below_payload_size() {
+        // Setting the cap below the payload size must reject.
+        let f = trained_forest(7, 50);
+        let bytes = f.to_bytes().unwrap();
+        let too_tight = bytes.len() - 1;
+        let err = RandomCutForest::<2>::from_bytes_with_max_size(&bytes, too_tight).unwrap_err();
+        assert!(matches!(err, RcfError::DeserializationFailed(_)));
+    }
+
+    #[test]
     fn updates_seen_counter_roundtrips() {
         let f = trained_forest(42, 75);
         let before = f.updates_seen();
@@ -626,5 +847,28 @@ mod json_tests {
             RandomCutForest::<2>::from_json("not json").unwrap_err(),
             RcfError::DeserializationFailed(_)
         ));
+    }
+
+    #[test]
+    fn json_oversize_payload_rejected_by_default_cap() {
+        // Synthesise a JSON string larger than MAX_JSON_BYTES via
+        // explicit-cap variant — feeding a real 1 GiB string into
+        // the default-cap variant would cost the test runner too
+        // much memory.
+        let f = small_trained();
+        let json = f.to_json().unwrap();
+        let err = RandomCutForest::<2>::from_json_with_max_size(&json, json.len() - 1).unwrap_err();
+        assert!(matches!(err, RcfError::DeserializationFailed(_)));
+    }
+
+    #[test]
+    fn json_with_max_size_round_trips_at_default_cap() {
+        let f = small_trained();
+        let json = f.to_json().unwrap();
+        let back = RandomCutForest::<2>::from_json_with_max_size(&json, MAX_JSON_BYTES).unwrap();
+        let probe = [3.0_f64, 4.0];
+        let s1: f64 = f.score(&probe).unwrap().into();
+        let s2: f64 = back.score(&probe).unwrap().into();
+        assert_eq!(s1, s2);
     }
 }

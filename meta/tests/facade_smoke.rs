@@ -13,6 +13,39 @@
 
 #![allow(clippy::unwrap_used, clippy::panic)]
 
+// --- Default-features smoke ----------------------------------
+//
+// These tests have NO `#[cfg(feature = ...)]` gate so they run
+// under the crate's default feature set (`["core", "std"]`) AND
+// under any superset including `full`. The point is to make
+// breakage of the default surface visible without having to
+// guess which combo CI happens to be running.
+
+/// Default features (`core + std`) must let consumers build a
+/// forest, score against it, and reach the bare cross-cuts
+/// (`MetricsSink`, `SeverityBands`) — the absolute minimum the
+/// crate's `default = ["core", "std"]` declaration commits to.
+#[test]
+fn default_features_build_score_via_facade() {
+    use anomstream::{
+        ForestBuilder, MetricsSink, NoopSink, RandomCutForest, Severity, SeverityBands,
+    };
+    let mut forest: RandomCutForest<2> = ForestBuilder::<2>::new()
+        .num_trees(50)
+        .sample_size(16)
+        .seed(2026)
+        .build()
+        .unwrap();
+    for i in 0..32_u32 {
+        let v = f64::from(i) * 0.01;
+        forest.update([v, v + 0.1]).unwrap();
+    }
+    let score = forest.score(&[5.0, 5.0]).unwrap();
+    let bands = SeverityBands::default();
+    let _: Severity = bands.classify(f64::from(score));
+    let _: &dyn MetricsSink = &NoopSink;
+}
+
 // --- Core-only smoke -----------------------------------------
 //
 // Exercised under every feature combo that includes `core` —
