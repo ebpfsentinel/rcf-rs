@@ -40,13 +40,33 @@ longer flagged. Two vectors:
   construction, applies a murmur3-style keyed finaliser to every
   `accept_hash` input before the modulo. Attacker cannot steer
   their flow hash into the admitted residue class without learning
-  the sampler secret; the secret never leaves the process.
-- **Per-prefix rate cap**: `PrefixRateCap::new(cap, window_ms)`
-  bounds how many admissions a single `/24`-prefix hash bucket
-  can push within a rolling window. Fixed 256-bucket sketch;
-  O(1) check-and-record; lock-free. Collisions are soft (by
+  the sampler secret; the secret never leaves the process. The
+  paired `UpdateSampler::new_keyed_with_seeds(keep, k1, k2)`
+  constructor accepts caller-supplied seeds for restricted
+  environments where `getrandom` is unavailable (early-boot
+  embedded, chroot without `/dev/urandom`,
+  `wasm32-unknown-unknown`); production deployments should still
+  source the seeds from a KMS / HSM-backed entropy stream.
+- **Per-prefix rate cap**:
+  `PrefixRateCap::new(NonZeroU32, NonZeroU64)` bounds how many
+  admissions a single `/24`-prefix hash bucket can push within a
+  rolling window. Fixed 256-bucket sketch — buckets are
+  **cache-line padded** (`#[repr(align(64))]`) so concurrent
+  `fetch_add`s on different buckets do not bounce a shared cache
+  line through MOESI/MESI; lock-free `check_and_record`,
+  `O(1)`. Soft over-admission window of ≈ `4 × cap_per_window`
+  per bucket per window under heavy concurrent load (the
+  `fetch_add` + cap-comparison sequence is two distinct atomics);
+  size the cap with that slack baked in. Collisions are soft (by
   design — trades a little cross-prefix interference for constant
   memory).
+- **LSH alert clusterer keyed hash**: `LshAlertClusterer::new`
+  draws a fresh per-instance 128-bit hash secret from
+  `getrandom` at construction so an offline-precomputed collision
+  set against one clusterer cannot be replayed against another.
+  `with_seed(buckets, attr_cap, seed)` exposes a deterministic
+  variant for snapshot replay; production must rotate the seed
+  per instance.
 - **Trimmed-mean score aggregator**:
   `RandomCutForest::score_trimmed(&point, trim_fraction)` sorts
   per-tree scores, drops the top and bottom `trim_fraction`
@@ -133,12 +153,85 @@ the updater thread, starving legitimate updates.
 - `UpdateSampler` drops low-value updates before the queue. A
   1/N stride or per-flow gate is free (no allocations, no
   syscalls).
+- `update_channel(capacity)` validates `capacity ∈
+  1..=MAX_CHANNEL_CAPACITY` (`1 << 20` slots) at construction —
+  caller cannot OOM the allocator with `usize::MAX` or silently
+  drop every offer with `0`. The non-panicking
+  `try_update_channel` Result-returning variant surfaces the
+  bound as `RcfError::InvalidConfig` for callers who want to
+  handle it gracefully. `PrefixRateCap` now uses
+  `NonZeroU32` / `NonZeroU64` typed parameters so the previous
+  asymmetry (`window_ms == 0` panicked, `cap == 0` silently
+  disabled the cap) is impossible to express.
+- `FeedbackStore::new(capacity, ...)` rejects `capacity >
+  MAX_CAPACITY = 65 536` — the bounded ledger can no longer be
+  driven into allocator pressure by a hostile config. The
+  per-cluster `contributing_tenants` rolodex on
+  `AlertClusterer` is bounded by `MAX_TENANTS_PER_CLUSTER = 32`
+  with FIFO eviction, so an attacker rotating synthetic tenant
+  keys against a single cluster cannot grow the membership
+  vector unboundedly. Per-call `MetricsSink` dispatch is
+  **batched every 64 ops** (`record_batched` helper) — line-rate
+  load no longer spends ≈160 ms / s on `Arc<dyn>` vtable calls;
+  call `flush_metrics()` on shutdown.
 
 ### Defences NOT shipped
 
 - No back-pressure signal from the updater to the sampler. If
   the updater falls behind, the queue drops silently until ops
   reacts to the `dropped_total` gauge.
+
+## T5 — Audit-trail tampering
+
+### Attack
+
+Attacker (or compromised storage layer / SIEM operator) edits,
+deletes, reorders, or splices `AlertRecord` entries at rest. A
+naïve `serde`-roundtrip of the records on disk performs **no**
+integrity check beyond the 4-byte version prefix, so a downstream
+consumer that decodes the bytes has no way to tell a tampered
+trail from the original. Compliance regimes (SOC2 CC6 / NIS2 /
+PCI-DSS 10.5) generally require the audit trail itself —
+not just the storage — to be tamper-evident.
+
+### Defences shipped
+
+- **HMAC-SHA256 audit chain** (`audit-integrity` feature):
+  `AuditChain::new(key)` wraps a stream of `AlertRecord`s in
+  `AuditChainEntry { record, seq, prev_tag, tag }` with
+  `tag = HMAC-SHA256(key, u64_le(seq) || prev_tag ||
+  postcard(record))`. Reordering breaks the next entry's
+  `prev_tag`; editing a record breaks its own `tag`; deleting a
+  record breaks the next entry's `prev_tag` linkage; forging an
+  appended entry without the secret key is computationally
+  infeasible. `verify_chain(entries, key, genesis_prev)` walks
+  the chain end-to-end with constant-time tag comparisons (via
+  the `subtle` crate) so a timing oracle cannot leak partial-tag
+  matches. `AuditChain::with_genesis(key, prev_tag, seq)`
+  resumes appending against persisted chain state.
+- **Schema-drift defence**: `AlertRecord` (and its
+  `AlertRecordShadow`) carry `#[serde(deny_unknown_fields)]` so a
+  newer-producer / older-consumer skew cannot silently drop
+  spliced fields. Schema bumps go through
+  `ALERT_RECORD_VERSION` and fail loudly at decode time.
+- **Persistence size cap**: `from_bytes` / `from_json` reject
+  payloads above `MAX_DESERIALIZE_BYTES = 256 MiB` /
+  `MAX_JSON_BYTES = 1 GiB` before any third-party decoder runs;
+  `from_*_with_max_size` opts into a larger bound on a per-call
+  basis for legitimate high-`D` deployments.
+
+### Defences NOT shipped
+
+- HMAC key management (rotation, KMS / HSM provisioning). The
+  chain accepts any `≥ 32-byte` key and treats it opaquely; the
+  caller integrates with their secrets store.
+- Record encryption at rest. Records remain plaintext on disk;
+  pair with at-rest encryption when the audit trail itself is
+  sensitive (e.g. customer PII inside the `point` field).
+- Cross-chain replay protection. Two chains with the same key
+  and `genesis_prev` produce the same tags for the same
+  records — rotate `genesis_prev` per chain (deriving from a
+  chain identifier) when separation matters.
 
 ## What is explicitly NOT in the threat model
 

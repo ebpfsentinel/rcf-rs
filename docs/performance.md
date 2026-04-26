@@ -252,7 +252,8 @@ nanosecond territory:
 | `UpdateSampler::accept_stride` keep=8              | 28 ns    | ~36 M/s    |
 | `UpdateSampler::accept_hash` (unkeyed) keep=8      | 14 ns    | ~73 M/s    |
 | `UpdateSampler::accept_hash` (keyed) keep=8        | 15 ns    | ~67 M/s    |
-| `PrefixRateCap::check_and_record` 100/1s           | 8.9 ns   | ~112 M/s   |
+| `PrefixRateCap::check_and_record` 100/1s           | 11.6 ns  | ~86 M/s    |
+| `PrefixRateCap::check_and_record` 8-thread contended | ~9 µs/op (foreground) | contention floor |
 | `update_channel::try_enqueue` cap=4096 (+ drain)   | 487 ns   | ~2.1 M/s   |
 | `metrics::default_sink()` shared-Arc clone         | 12 ns    | ~85 M/s    |
 
@@ -265,13 +266,26 @@ nanosecond territory:
   lock, not by try_send itself. 2.1 M/s per producer is more
   than enough for typical TC/XDP hot paths (~1-10 M pkt/s at
   10 Gbps, with multiple producer clones fanning out).
-- **`PrefixRateCap` 8.9 ns** reflects the post-hardening
-  rollover path: an `Acquire` `load` of `window_start_ms` plus
-  an inlined `saturating_sub` short-circuits the common
-  "window still valid" case before any CAS runs. The full
-  `compare_exchange_weak` loop only triggers once per window
-  roll, not once per packet (-60 % vs the earlier race-prone
-  `load` → single `compare_exchange` code).
+- **`PrefixRateCap` 11.6 ns** reflects the post-hardening rollover
+  path (Acquire `load` of `window_start_ms` short-circuits the
+  common "window still valid" case before any CAS runs) plus
+  batched metrics dispatch (1 sink call per `METRICS_BATCH_SIZE
+  = 64` ops vs per call). Down from 18 ns pre-batching (-36 %).
+  The `compare_exchange_weak` loop only triggers once per window
+  roll, not once per packet.
+- **Cache-line padding**: `PrefixRateCap` buckets are
+  `#[repr(C, align(64))]` (16 KiB total vs 1 KiB unpadded) so
+  concurrent `fetch_add`s on different buckets do not bounce a
+  shared cache line through MOESI/MESI. The 8-thread contended
+  bench measures the residual cross-thread cost on the shared
+  `window_start_ms` CAS — without padding, the bucket false
+  sharing adds another order of magnitude.
+- **Batched metrics**: `record_batched` accumulates per-counter
+  increments locally and emits to the `Arc<dyn MetricsSink>`
+  every 64 ops. At 12.5 Mpps the savings vs per-call dispatch
+  are ≈157 ms / s of CPU clock per producer; in-process atomic
+  counters stay bit-exact every call. Drain residue at shutdown
+  via `flush_metrics()`.
 
 ## Streaming quantiles / histograms
 
@@ -317,6 +331,8 @@ the score stream instead.
 | `ensemble::fisher_combine` k=128            | 642 ns  | ~1.6 M/s   |
 | `FeedbackStore::label` capacity=256         | 571 ns  | ~1.8 M/s   |
 | `FeedbackStore::adjust` 512 labels, D=16    | 8.6 µs  | ~116 k/s   |
+| `AuditChain::append` D=4 (HMAC-SHA256 + postcard) | 426 ns | ~2.3 M/s |
+| `verify_audit_chain` 256 entries D=4        | 121 µs  | ~470 ns/entry |
 
 - **LSH clustering**: `observe` = `hash_divector` + HashMap
   bucket increment. After the `String` → `u128` FNV-1a fold

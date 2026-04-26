@@ -75,15 +75,18 @@ The Random Cut Forest implementation inside the toolkit is a focused port of the
 
 **SOC + ops**
 
-- `AlertClusterer` / `LshAlertClusterer` — cosine + LSH alert dedup
-- `FeedbackStore` — SOC-label-driven score adjustment
-- `AlertRecord` / `AlertContext` — immutable alert envelope (triage crate)
+- `AlertClusterer` / `LshAlertClusterer` — cosine + LSH alert dedup (LSH carries per-instance random seed against collision-craft attacks)
+- `FeedbackStore` — SOC-label-driven score adjustment, capped at `MAX_CAPACITY = 65 536` labels
+- `AlertRecord` / `AlertContext` — immutable alert envelope (triage crate); `#[serde(deny_unknown_fields)]` rejects schema-drift splices
+- `AuditChain` / `AuditChainEntry` / `verify_audit_chain` — HMAC-SHA256-chained tamper-evident audit trail (`audit-integrity` feature)
 - `ForensicBaseline` — post-hoc distance-to-sample summary
 
 **Hot-path ingress**
 
-- `hot_path::UpdateSampler` / `PrefixRateCap` / `update_channel` — stride - hash + keyed sampler, 256-bucket atomic counter sketch, bounded MPSC channel for classifier/updater thread split
-- `MetricsSink` — pluggable telemetry (`NoopSink` + your own impl)
+- `hot_path::UpdateSampler` (`new` / `new_keyed` / `new_keyed_with_seeds`) — stride or per-flow-hash sampler, optional 128-bit per-instance secret (against MITRE ATLAS `AML.T0020`), with caller-supplied-seed variant for restricted environments where `getrandom` is unavailable
+- `hot_path::PrefixRateCap::new(NonZeroU32, NonZeroU64)` / `disabled(NonZeroU64)` — typed-cap 256-bucket atomic counter sketch, cache-line-padded buckets defeat false sharing across cores
+- `hot_path::update_channel` / `try_update_channel` — bounded MPSC channel (capacity `1..=MAX_CHANNEL_CAPACITY`, validated) for classifier/updater thread split; non-panicking `try_*` Result variants
+- `MetricsSink` — pluggable telemetry (`NoopSink` + your own impl); hot-path dispatch is **batched every `METRICS_BATCH_SIZE = 64` ops** (≈64× fewer vtable calls under line-rate load), call `flush_metrics()` at shutdown to drain residue
 
 **Evaluation**
 
@@ -212,11 +215,19 @@ Details: [docs/conformance_rcf.md](docs/conformance_rcf.md).
 | `serde`       | ❌      | State serialisation                                      |
 | `postcard`    | ❌      | Compact binary persistence (implies `serde`)             |
 | `serde_json`  | ❌      | JSON persistence (implies `serde`)                       |
-| `full`        | ❌      | Convenience alias for `core + triage + hotpath + std + parallel + serde + postcard` |
+| `audit-integrity` | ❌  | HMAC-SHA256-chained tamper-evident `AuditChain` (pulls `hmac` + `sha2` + `subtle`; implies `triage + std + serde + postcard`) |
+| `full`        | ❌      | Convenience alias for `core + triage + hotpath + std + parallel + serde + postcard + serde_json + audit-integrity` |
 
-The default is `["core", "std"]` — deliberately minimal so consumers
-pay only for what they import. Enable `full` for the "everything
-wired in" deployment or cherry-pick layers explicitly.
+The facade default is `["core", "std"]` — deliberately minimal so
+consumers pay only for what they import. Enable `full` for the
+"everything wired in" deployment or cherry-pick layers explicitly.
+
+The member crates (`anomstream-core`, `anomstream-triage`,
+`anomstream-hotpath`) ship with **`default = []`** so direct-dep
+consumers do not pay for `std` / `serde` / `postcard` they never
+use. The historical "everything on" set is still reachable via the
+facade's default features or by enabling `["std", "serde",
+"postcard"]` explicitly.
 
 ### Module availability table
 
@@ -230,7 +241,8 @@ wired in" deployment or cherry-pick layers explicitly.
 | `ShingledForest`, `DynamicForest`, `DriftAwareForest`, `TenantForestPool`, `MatrixProfile` | `std`                  |
 | `TsbAdMDataset`, `vus_pr` / `range_auc_pr`      | `std`                  |
 | `AlertClusterer`, `AlertRecord`, `FeedbackStore`, `PlattCalibrator`, `SageEstimator`, `LshAlertClusterer` | `triage` (+ `std`) |
-| `UpdateSampler`, `PrefixRateCap`, `update_channel`, `MetricsSink` | `hotpath` (+ `std`)    |
+| `AuditChain`, `AuditChainEntry`, `verify_audit_chain`, `AUDIT_CHAIN_*` consts | `audit-integrity` |
+| `UpdateSampler`, `PrefixRateCap`, `update_channel`, `try_update_channel`, `MetricsSink`, `MAX_CHANNEL_CAPACITY`, `METRICS_BATCH_SIZE` | `hotpath` (+ `std`) |
 
 ### `no_std` + `alloc`
 
@@ -278,28 +290,6 @@ done | tee vus_pr.log
 ```
 
 The example uses `DynamicForest<128>` with a 50 % calibration / 50 % scoring split. Swap in `MatrixProfile` or your own detector by editing `core/examples/tsb_ad_m_eval.rs`.
-
-## CI + release
-
-CI runs on a weekly schedule (Monday 03:00 UTC) plus on demand via
-`workflow_dispatch`, not per-commit — fmt, clippy, `no_std`,
-feature-matrix, test, doc, `bench --no-run`, examples, audit,
-deny, machete, and CycloneDX SBOM. See `.github/workflows/ci.yml`.
-
-`.github/workflows/release.yml` fires on every `v*` tag push and
-manually; it enforces a stricter release gate before allowing a
-publish:
-
-- workspace `version` is not the `0.0.0-dev` sentinel
-- git tag matches `Cargo.toml` workspace version (`v<version>`)
-- full fmt / clippy / tests / doc pass
-- `cargo audit` + `cargo deny check` clean
-- `cargo publish --dry-run` succeeds for every member in the
-  publish order `core → triage → hotpath → anomstream`
-
-A maintainer still runs the actual `cargo publish` with
-`CARGO_REGISTRY_TOKEN` in hand — the workflow gates readiness of
-the tag, not the publication itself.
 
 ## License
 

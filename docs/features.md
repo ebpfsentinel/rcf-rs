@@ -962,19 +962,43 @@ hot path cheap. Emits `rcf_alerts_observed_total`,
 `rcf_alert_clusters_pruned_total` counters and the
 `rcf_alert_clusters_active` gauge.
 
-Types: `AlertClusterer`, `AlertCluster`, `ClusterDecision`.
+Active-cluster pool is hard-capped at `DEFAULT_MAX_CLUSTERS =
+16 384` (override via `with_max_clusters`); exceeding the cap
+LRU-evicts the oldest cluster. Per-cluster
+`contributing_tenants` rolodex is hard-capped at
+`MAX_TENANTS_PER_CLUSTER = 32` with FIFO eviction so an attacker
+rotating synthetic tenant keys against a single cluster cannot
+grow the membership vector unboundedly. The default `K = String`
+clones the tenant identity once per distinct tenant joining a
+cluster — at MSSP scale (10 k+ alerts / s, churning tenants)
+prefer `AlertClusterer::<u64, D>` (or `Arc<str>` for refcount-
+bump clones) to drop the heap traffic.
+
+Types: `AlertClusterer`, `AlertCluster`, `ClusterDecision`,
+`DEFAULT_MAX_CLUSTERS`, `MAX_TENANTS_PER_CLUSTER`.
 
 Source: `src/alert_cluster.rs`.
 
 ### `LshAlertClusterer` — LSH-based dedup
 
-`LshAlertClusterer` (in `anomstream_core::lsh_cluster`) — quantises
-every per-dim attribution value into a 4-bit symbol and uses the
-concatenated hex string as the bucket key. `O(1)` lookup via
-`HashMap<String, u64>`. Complement to the cosine-similarity
-`AlertClusterer` — LSH scales to MSSP-volume alert streams where
-pairwise cosine is too slow. Mirrors the TLSH spirit (Oliver et
-al. 2013) without bigram-frequency overhead.
+`LshAlertClusterer` (`anomstream_triage::lsh_cluster`) — quantises
+every per-dim signed attribution into a 16-bucket symbol and folds
+the per-dim bucket sequence into a `u128` via FNV-1a. `O(1)`
+lookup via `HashMap<u128, u64>`. Complement to the
+cosine-similarity `AlertClusterer` — LSH scales to MSSP-volume
+alert streams where pairwise cosine is too slow. Mirrors the
+TLSH spirit (Oliver et al. 2013) without bigram-frequency
+overhead.
+
+Each instance draws a fresh 128-bit hash secret from
+`getrandom` at construction (`LshAlertClusterer::new` /
+`default_lsh`), pre- and post-XOR'd into the FNV state so an
+offline-precomputed collision set against one clusterer cannot
+be replayed against another (defends against
+`AML.T0020`-style alert-deduplication crafting).
+`LshAlertClusterer::with_seed(buckets, attr_cap, seed)` exposes
+a deterministic variant for snapshot replay; **do not** hard-code
+a constant seed in production.
 
 Types: `LshAlertClusterer`, `LshClusterDecision`.
 
@@ -994,12 +1018,23 @@ side: the hot-path `score()` is untouched, adjustment is an
 additive bias layer the caller applies post-score.
 
 Lifetime defaults: `capacity = 512`, `sigma = 1.0`, `strength =
-1.0`. FIFO eviction on capacity pressure. Clamps adjusted score
-to `≥ 0`.
+1.0`. FIFO eviction on capacity pressure. Caller-configured
+`capacity` is hard-capped at `MAX_CAPACITY = 65 536` so a
+hostile config cannot drive the allocator into pressure with
+`usize::MAX`. Clamps adjusted score to `≥ 0`.
+
+`adjust(probe, raw_score)` is `O(D · L)` per call (where `L` is
+the live label count): walks every stored label and computes a
+`D`-element squared distance + one `exp` per label. At
+`MAX_CAPACITY` and `D = 64`, that is ≈ 1 ms per call on a modern
+core — fine for SOC triage cadence (one call per alert), **not**
+for hot-path per-packet adjustment. High-`D` (`D ≥ 1024`) /
+high-`L` (`L ≥ 16 384`) deployments should prune `capacity`,
+shard per tenant, or pair with a spatial index.
 
 Types: `FeedbackStore<D>`, `FeedbackLabel`,
 `FEEDBACK_DEFAULT_CAPACITY`, `FEEDBACK_DEFAULT_SIGMA`,
-`FEEDBACK_DEFAULT_STRENGTH`.
+`FEEDBACK_DEFAULT_STRENGTH`, `MAX_CAPACITY`.
 
 Source: `src/feedback.rs`.
 
@@ -1015,13 +1050,46 @@ on the exact probe and from 2.35 → 1.36 on a nearby one).
 Build via `AlertRecord::from_forest` (bare RCF) or
 `AlertRecord::from_thresholded` (TRCF); chain `with_severity` to
 attach a band. Versioned through `ALERT_RECORD_VERSION` so
-incompatible schema changes surface at decode time. Emit to a
-SIEM / object-store / WORM log via any `serde` sink — postcard
-for compact per-event bytes, JSON for self-describing records.
+incompatible schema changes surface at decode time.
+`#[serde(deny_unknown_fields)]` on `AlertRecord`,
+`AlertRecordShadow`, and `AlertContext` rejects splice-field
+attacks where a newer producer adds fields and an older consumer
+silently drops them. Emit to a SIEM / object-store / WORM log
+via any `serde` sink — postcard for compact per-event bytes,
+JSON for self-describing records.
+
+`AlertRecord` is an **operational log**, not a tamper-evident
+audit trail — the `serde` roundtrip carries no integrity check
+beyond the version prefix. For SOC2 CC6 / NIS2 / PCI-DSS 10.5
+audit-trail requirements, wrap each emission in `AuditChain`
+(below).
 
 Types: `AlertRecord`, `AlertContext`, `ALERT_RECORD_VERSION`.
 
 Source: `src/audit.rs`.
+
+### `AuditChain<K, D>` — tamper-evident HMAC envelope
+
+`anomstream-triage` ships an HMAC-SHA256 audit chain behind the
+`audit-integrity` feature. Each emitted record lands in an
+`AuditChainEntry { record, seq, prev_tag, tag }` where `tag =
+HMAC-SHA256(key, u64_le(seq) || prev_tag || postcard(record))`,
+chaining `prev_tag` from the previous entry's tag so reordering
+or deletion breaks the linkage. `verify_chain(entries, key,
+genesis_prev)` walks the chain end-to-end with constant-time tag
+comparisons (via the `subtle` crate); `AuditChain::with_genesis`
+resumes appending against persisted chain state.
+
+Threat model and key-management caveats (key rotation, at-rest
+encryption, cross-chain replay) live in `docs/threat_model.md`
+under T5.
+
+Types: `AuditChain`, `AuditChainEntry`, `verify_audit_chain`,
+`AUDIT_CHAIN_GENESIS_PREV`, `AUDIT_CHAIN_TAG_LEN`,
+`AUDIT_CHAIN_MIN_KEY_LEN`. Pulls `hmac` + `sha2` + `subtle` (all
+no-default-features) and is std-only.
+
+Source: `src/audit_chain.rs`.
 
 ## Training & retention
 
@@ -1192,31 +1260,71 @@ before any RCF work. Two decision modes:
   baseline shape per flow rather than slicing any single flow.
 
 Build via `UpdateSampler::new(keep)` (unkeyed, deterministic
-admission — back-compatible) or **`UpdateSampler::new_keyed(keep)`**
+admission — back-compatible), **`UpdateSampler::new_keyed(keep)`**
 (128-bit secret from `getrandom`, murmur3 keyed mix applied
-before the modulo). Keyed sampler defends against the
-reservoir-poisoning spray (MITRE ATLAS `AML.T0020`) where an
-attacker steers their flow hash into the admitted residue class.
+before the modulo), or
+**`UpdateSampler::new_keyed_with_seeds(keep, k1, k2)`**
+(caller-supplied seeds, for restricted environments where
+`getrandom` is unavailable — embedded boot, chroot without
+`/dev/urandom`, `wasm32-unknown-unknown`). Keyed sampler defends
+against the reservoir-poisoning spray (MITRE ATLAS `AML.T0020`).
 
-`channel::<D>(capacity)` returns `(UpdateProducer<D>,
-UpdateConsumer<D>)` — bounded MPSC on `std::sync::mpsc::sync_channel`.
-Clone the producer per classifier thread; hand the consumer to a
-dedicated updater thread. `try_enqueue` is non-blocking; on
-queue-full it drops + increments `dropped_total` (ops signal
-for "classifier outpaces updater"). The classifier scores
-against the previous-generation forest snapshot while the
-updater drains at its own cadence.
+`update_channel::<D>(capacity)` returns `(UpdateProducer<D>,
+UpdateConsumer<D>)` — bounded MPSC on
+`std::sync::mpsc::sync_channel`. Capacity is validated
+`1..=MAX_CHANNEL_CAPACITY` (`1 << 20` slots) at construction;
+caller cannot OOM the allocator with `usize::MAX` or silently
+drop every offer with `0`. The non-panicking
+`try_update_channel` Result-returning variant surfaces the bound
+as `RcfError::InvalidConfig`. Clone the producer per classifier
+thread; hand the consumer to a dedicated updater thread.
+`try_enqueue` is non-blocking; on queue-full it drops +
+increments `dropped_total` (ops signal for "classifier outpaces
+updater"). The classifier scores against the
+previous-generation forest snapshot while the updater drains at
+its own cadence.
 
-Types: `UpdateSampler`, `UpdateProducer<D>`, `UpdateConsumer<D>`.
+`MetricsSink` dispatch on `accept_*` / `try_enqueue` /
+`check_and_record` is **batched every `METRICS_BATCH_SIZE = 64`
+hot-path calls** — line-rate load no longer pays the per-call
+`Arc<dyn>` vtable cost (≈13 ns × 12.5 Mpps ≈ 160 ms / s of
+clock burned on dispatch). The in-process atomic counters
+(`accepted_total`, `enqueued_total`, `admitted_total`, …) stay
+bit-exact every call; the sink view lags by ≤ 64 increments.
+Call `flush_metrics()` on shutdown to drain the residue.
 
-Source: `src/hot_path.rs`.
+Types: `UpdateSampler`, `UpdateProducer<D>`, `UpdateConsumer<D>`,
+`MAX_CHANNEL_CAPACITY`, `METRICS_BATCH_SIZE`. Functions:
+`update_channel`, `update_channel_with_sink`,
+`try_update_channel`, `try_update_channel_with_sink`.
+
+Source: `src/lib.rs` (anomstream-hotpath crate).
 
 ### `PrefixRateCap` — per-prefix admission rate cap
 
-`anomstream_core::hot_path::PrefixRateCap::new(cap_per_window, window_ms)`
-bounds how many admissions a single source-prefix hash bucket
-can push into the reservoir within a rolling window. Fixed
-256-bucket counter sketch, lock-free `check_and_record`.
+`PrefixRateCap::new(cap: NonZeroU32, window: NonZeroU64)` bounds
+how many admissions a single source-prefix hash bucket can push
+into the reservoir within a rolling window. Both arguments are
+`NonZero` typed so the previous footgun pair (`window_ms == 0`
+panicked, `cap_per_window == 0` silently disabled the cap) is
+impossible to express; use `PrefixRateCap::disabled(window)` for
+the explicit always-admit mode.
+
+Fixed 256-bucket counter sketch, lock-free `check_and_record`.
+Each bucket is **cache-line padded** (`#[repr(C, align(64))]`,
+16 KiB total vs 1 KiB unpadded) so concurrent `fetch_add`s on
+different buckets do not bounce a shared cache line through
+MOESI/MESI — multi-core throughput stays close to the single
+thread cost. The bench
+`hot_path_prefix_cap/check_and_record_contended_8threads`
+quantifies the gain.
+
+Soft over-admission window of ≈ `4 × cap_per_window` per bucket
+per window under heavy concurrent load (the `fetch_add` +
+cap-comparison sequence is two distinct atomics — design the
+operator-facing cap with that slack baked in by passing
+`cap_per_window = ceiling / 4`).
+
 Second defence line (alongside the keyed `UpdateSampler`)
 against reservoir-poisoning floods from a single compromised
 source — documented in `docs/threat_model.md`.
