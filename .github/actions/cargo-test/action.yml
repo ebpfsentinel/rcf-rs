@@ -1,0 +1,15 @@
+name: cargo test
+description: Run cargo test on the supplied scope.
+
+inputs:
+  scope:
+    description: "Cargo scope flags (e.g. '--workspace --all-features')."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SCOPE: ${{ inputs.scope }}
+      run: cargo test $SCOPE

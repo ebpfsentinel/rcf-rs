@@ -1,0 +1,72 @@
+name: Security
+
+# Reusable family workflow — supply-chain checks: cargo audit,
+# cargo deny, cargo machete (unused deps), CycloneDX SBOM.
+#
+# Called from `ci.yml` (weekly) and `release.yml` (per tag).
+# Standalone via `workflow_dispatch`.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "If set, stamp this version into Cargo.toml + README before scanning."
+        type: string
+        required: false
+        default: ""
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - if: inputs.version != ''
+        uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ inputs.version }}
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - if: inputs.version != ''
+        uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ inputs.version }}
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+  machete:
+    name: cargo machete (unused deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - if: inputs.version != ''
+        uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ inputs.version }}
+      - uses: bnjbvr/cargo-machete@v0.9.2
+
+  sbom:
+    name: CycloneDX SBOM (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - if: inputs.version != ''
+        uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ inputs.version }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cyclonedx-sbom

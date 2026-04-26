@@ -1,0 +1,8 @@
+name: cargo build --examples
+description: Compile every workspace example with all features enabled.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: cargo build --workspace --examples --all-features

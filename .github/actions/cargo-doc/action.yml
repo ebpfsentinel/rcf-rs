@@ -1,0 +1,17 @@
+name: cargo doc (strict intra-doc links)
+description: Build workspace docs with broken intra-doc links denied.
+
+inputs:
+  scope:
+    description: "Cargo scope flags."
+    required: false
+    default: "--workspace --all-features --no-deps"
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SCOPE: ${{ inputs.scope }}
+        RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+      run: cargo doc $SCOPE

@@ -94,9 +94,13 @@ fn score_many_matches_individual_calls() {
     for (i, p) in probes.iter().enumerate() {
         let individual: f64 = f.score(p).unwrap().into();
         let from_bulk: f64 = bulk[i].into();
-        assert_eq!(
-            individual, from_bulk,
-            "mismatch at idx {i}: single={individual} bulk={from_bulk}",
+        // Under rayon, parallel scoring may reorder floating
+        // accumulations by a ULP — match the tolerance used by
+        // `attribution_many_output_matches_per_point`.
+        let delta = (individual - from_bulk).abs();
+        assert!(
+            delta < 1e-10,
+            "mismatch at idx {i}: single={individual} bulk={from_bulk} delta={delta}",
         );
     }
 }

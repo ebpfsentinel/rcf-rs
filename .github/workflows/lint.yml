@@ -1,0 +1,68 @@
+name: Lint
+
+# Reusable family workflow — fmt + clippy (×2 feature scopes).
+# Called from `ci.yml` (weekly) and `release.yml` (per tag).
+# Standalone via `workflow_dispatch` for ad-hoc runs.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "If set, stamp this version into Cargo.toml + README before linting."
+        type: string
+        required: false
+        default: ""
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - if: inputs.version != ''
+        uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ inputs.version }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: ./.github/actions/cargo-fmt
+
+  clippy-all-features:
+    name: clippy (--all-features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - if: inputs.version != ''
+        uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ inputs.version }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-clippy
+        with:
+          scope: --workspace --all-targets --all-features
+
+  clippy-no-default:
+    name: clippy (--no-default-features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - if: inputs.version != ''
+        uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ inputs.version }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-clippy
+        with:
+          scope: --workspace --no-default-features

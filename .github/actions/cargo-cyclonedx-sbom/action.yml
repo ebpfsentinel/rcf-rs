@@ -1,0 +1,21 @@
+name: CycloneDX SBOM
+description: Generate a CycloneDX SBOM for the workspace and upload it as an artifact.
+
+inputs:
+  artifact-name:
+    description: "Name of the uploaded artifact."
+    required: false
+    default: sbom-cyclonedx
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: cargo install --locked cargo-cyclonedx
+    - shell: bash
+      run: cargo cyclonedx --format json --all-features
+    - uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: "**/*.cdx.json"
+        if-no-files-found: error

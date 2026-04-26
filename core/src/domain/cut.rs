@@ -4,7 +4,7 @@
 //! [`Cut::random_cut`] picks the dimension proportionally to the
 //! per-dimension range of the [`BoundingBox`] (Guha et al. 2016, §2)
 //! then samples the cut value uniformly in `[min_d, max_d]`. Callers
-//! pass any [`rand::RngCore`] so reproducibility is purely a function
+//! pass any [`rand::Rng`] so reproducibility is purely a function
 //! of the seed they own.
 //!
 //! When the bounding box is fully degenerate (every dimension has

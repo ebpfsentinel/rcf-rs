@@ -1,0 +1,15 @@
+name: cargo publish --dry-run
+description: Dry-run a single workspace member's publish.
+
+inputs:
+  package:
+    description: "Workspace member crate name (e.g. 'anomstream-core')."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+      run: cargo publish --dry-run -p "$PACKAGE" --allow-dirty

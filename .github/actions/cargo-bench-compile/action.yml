@@ -1,0 +1,8 @@
+name: cargo bench --no-run
+description: Compile every workspace bench with all features enabled (does not run them).
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: cargo bench --workspace --no-run --all-features

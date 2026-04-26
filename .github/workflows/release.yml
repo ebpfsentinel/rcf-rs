@@ -1,7 +1,8 @@
 name: Release
 
-# Fires automatically on `v*` tag push (e.g. `v2026.4.1`), or manually
-# via `workflow_dispatch` (with optional `force_version` input).
+# Fires automatically on `v*` tag push (e.g. `v2026.4.1`), or
+# manually via `workflow_dispatch` (with optional `force_version`
+# input).
 #
 # Version logic mirrors ebpfsentinel (calendar versioning YYYY.M.X):
 #   - tag push  → version = tag without the `v` prefix
@@ -13,11 +14,10 @@ name: Release
 #     version specs that currently read `0.0.0-dev`)
 #   - README.md (`cargo add` snippets)
 #
-# Then the release gate runs:
-#   1. Full `fmt` + `clippy -D warnings` + workspace tests.
-#   2. `cargo audit` clean + `cargo deny check` clean.
-#   3. `cargo publish --dry-run` for every publishable member in
-#      dependency order (`core → triage → hotpath → anomstream`).
+# Then the same four family workflows that `ci.yml` runs (lint,
+# test, build, security) are re-run against the stamped tree, plus
+# a publish dry-run, and finally the tag + GitHub Release publish
+# job.
 #
 # Actual `cargo publish` is still triggered manually by a maintainer
 # with `CARGO_REGISTRY_TOKEN` in scope — this workflow gates the
@@ -34,17 +34,13 @@ on:
         required: false
         type: string
 
-env:
-  CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
-  RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+permissions:
+  contents: read
 
 jobs:
   prepare:
     name: Prepare
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
@@ -84,46 +80,37 @@ jobs:
           echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
           echo "::notice::Resolved version: ${VERSION}"
 
-  gate:
-    name: full release gate
+  lint:
+    name: Lint
     needs: prepare
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: ./.github/actions/stamp-version
-        with:
-          version: ${{ needs.prepare.outputs.version }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo clippy --workspace --no-default-features -- -D warnings
-      - run: cargo test --workspace --all-features
-      - run: cargo test --workspace --no-default-features --features "anomstream-core/std"
-      - run: cargo doc --workspace --all-features --no-deps
+    uses: ./.github/workflows/lint.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
 
-  audit:
-    name: cargo audit + deny
+  test:
+    name: Test
     needs: prepare
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: ./.github/actions/stamp-version
-        with:
-          version: ${{ needs.prepare.outputs.version }}
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
-          arguments: --all-features
+    uses: ./.github/workflows/test.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+
+  build:
+    name: Build
+    needs: prepare
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+
+  security:
+    name: Security
+    needs: prepare
+    uses: ./.github/workflows/security.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
 
   publish-dry-run:
-    name: publish chain --dry-run
-    needs: [prepare, gate, audit]
+    name: cargo publish --dry-run (anomstream-core)
+    needs: [prepare, lint, test, build, security]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -132,16 +119,19 @@ jobs:
           version: ${{ needs.prepare.outputs.version }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo publish --dry-run -p anomstream-core --allow-dirty
-      - run: cargo publish --dry-run -p anomstream-triage --allow-dirty
-      - run: cargo publish --dry-run -p anomstream-hotpath --allow-dirty
-      - run: cargo publish --dry-run -p anomstream --allow-dirty
+      # Only `anomstream-core` can dry-run before first publication —
+      # the other members depend on `anomstream-core` by version
+      # string, and cargo's dry-run resolves that against crates.io.
+      # After core's first publish, expand to the full chain in
+      # dependency order: core → triage → hotpath → anomstream.
+      - uses: ./.github/actions/cargo-publish-dry-run
+        with:
+          package: anomstream-core
 
-  # ── Tag + GitHub Release (only after gate + audit + dry-run succeed) ──
   publish:
     name: Publish Release
     runs-on: ubuntu-latest
-    needs: [prepare, gate, audit, publish-dry-run]
+    needs: [prepare, lint, test, build, security, publish-dry-run]
     permissions:
       contents: write
     steps:

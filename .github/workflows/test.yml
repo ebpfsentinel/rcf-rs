@@ -1,0 +1,129 @@
+name: Test
+
+# Reusable family workflow — workspace tests across (os, rust),
+# core/std test row, no_std build matrix, facade feature matrix,
+# and `-Z minimal-versions` regression guard.
+#
+# Called from `ci.yml` (weekly) and `release.yml` (per tag).
+# Standalone via `workflow_dispatch`.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "If set, stamp this version into Cargo.toml + README before testing."
+        type: string
+        required: false
+        default: ""
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  workspace-tests:
+    name: test (${{ matrix.os }}, ${{ matrix.rust }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        rust: [stable, "1.95"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - if: inputs.version != ''
+        uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ inputs.version }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-test
+        with:
+          scope: --workspace --all-features
+      # `--workspace --no-default-features` would build every member
+      # with its features off — `anomstream-hotpath` is `#![cfg(feature
+      # = "std")]` (whole crate empty) and the `anomstream` facade
+      # loses its `core` re-exports. Scope to `anomstream-core` only.
+      - uses: ./.github/actions/cargo-test
+        with:
+          scope: -p anomstream-core --no-default-features --features std
+
+  no-std-builds:
+    name: no_std build (core, triage)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - if: inputs.version != ''
+        uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ inputs.version }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-check
+        with:
+          scope: -p anomstream-core --no-default-features
+      - uses: ./.github/actions/cargo-check
+        with:
+          scope: -p anomstream-core --no-default-features --features serde
+      - uses: ./.github/actions/cargo-check
+        with:
+          scope: -p anomstream-triage --no-default-features
+      - uses: ./.github/actions/cargo-check
+        with:
+          scope: -p anomstream-triage --no-default-features --features serde
+
+  feature-matrix:
+    name: meta facade feature matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - "core"
+          - "core,std"
+          - "core,std,serde"
+          - "core,triage"
+          - "core,triage,std,serde"
+          - "core,hotpath"
+          - "core,triage,hotpath"
+          - "core,parallel,postcard,serde_json"
+          - "full"
+    steps:
+      - uses: actions/checkout@v6
+      - if: inputs.version != ''
+        uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ inputs.version }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-check
+        with:
+          scope: -p anomstream --no-default-features --features ${{ matrix.features }}
+
+  minimal-versions:
+    name: minimal-versions (nightly -Z minimal-versions)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - if: inputs.version != ''
+        uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ inputs.version }}
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      # Resolve every dependency to the oldest version its
+      # `Cargo.toml` constraint permits. Catches drift where a loose
+      # requirement (`foo = "1"`) relies on features only added in
+      # `1.x.y+n`. Nightly is the only toolchain that ships
+      # `-Z minimal-versions`; we still build under stable afterwards
+      # to confirm the minimal set compiles cleanly.
+      - shell: bash
+        run: cargo +nightly update -Z minimal-versions
+      - uses: ./.github/actions/cargo-check
+        with:
+          scope: --workspace --all-features
+      - shell: bash
+        run: cargo update # restore the normal lockfile.

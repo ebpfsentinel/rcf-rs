@@ -1,204 +1,43 @@
 name: CI
 
-# Manual + weekly schedule.
+# Top-level orchestrator. Calls the four reusable family
+# workflows (lint / test / build / security) on the development
+# sources (no version stamping).
 #
-# Rationale: per-commit CI adds noise without catching issues that
-# a developer's local `cargo fmt && cargo clippy -- -D warnings &&
-# cargo test` loop would not — and the SBOM / dry-publish jobs are
-# slow. The weekly cron surfaces supply-chain drift (yanked
-# dependencies, fresh advisories, cargo-audit, cargo-deny) without
-# paying per-push runtime minutes. Use `workflow_dispatch` to run
-# the suite manually before tagging a release.
+# Per-commit CI is intentionally disabled — local
+# `cargo fmt && cargo clippy -- -D warnings && cargo test` covers
+# the hot loop. The Monday cron surfaces supply-chain drift
+# (yanked deps, fresh advisories) and `workflow_dispatch` is the
+# pre-tag manual run.
 #
-# The separate `release.yml` workflow fires automatically on
-# `v*` tags and runs a stricter gate (version != `0.0.0-dev`,
-# full publish-chain dry-run).
+# `release.yml` reuses the same four family workflows (stamped
+# with the resolved version) and adds `publish-dry-run` + the
+# tag/GitHub-Release publish job on top.
+
 on:
   workflow_dispatch:
   schedule:
     # Every Monday 03:00 UTC.
     - cron: "0 3 * * 1"
 
-env:
-  CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+permissions:
+  contents: read
 
 jobs:
-  fmt:
-    name: rustfmt
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --all -- --check
-
-  clippy:
-    name: clippy (workspace)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo clippy --workspace --no-default-features -- -D warnings
-
-  no_std:
-    name: no_std build (core, triage)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check -p anomstream-core --no-default-features
-      - run: cargo check -p anomstream-core --no-default-features --features serde
-      - run: cargo check -p anomstream-triage --no-default-features
-      - run: cargo check -p anomstream-triage --no-default-features --features serde
-
-  feature_matrix:
-    name: meta facade feature matrix
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        features:
-          - "core"
-          - "core,std"
-          - "core,std,serde"
-          - "core,triage"
-          - "core,triage,std,serde"
-          - "core,hotpath"
-          - "core,triage,hotpath"
-          - "core,parallel,postcard,serde_json"
-          - "full"
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check -p anomstream --no-default-features --features "${{ matrix.features }}"
+  lint:
+    name: Lint
+    uses: ./.github/workflows/lint.yml
 
   test:
-    name: test (${{ matrix.os }}, ${{ matrix.rust }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        rust: [stable, "1.95"]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.rust }}
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-features
-      - run: cargo test --workspace --no-default-features --features "anomstream-core/std"
+    name: Test
+    uses: ./.github/workflows/test.yml
 
-  minimal_versions:
-    name: minimal-versions (nightly -Zminimal-versions)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
-      # Resolve every dependency to the oldest version its
-      # `Cargo.toml` constraint permits. Catches drift where a
-      # loose requirement (`foo = "1"`) relies on features only
-      # added in `1.x.y+n`. Nightly is the only toolchain that
-      # ships `-Z minimal-versions`; we still build under stable
-      # afterwards to confirm the minimal set compiles cleanly.
-      - run: cargo +nightly update -Z minimal-versions
-      - run: cargo check --workspace --all-features
-      - run: cargo update # restore the normal lockfile.
+  build:
+    name: Build
+    uses: ./.github/workflows/build.yml
 
-  doc:
-    name: cargo doc (workspace)
-    runs-on: ubuntu-latest
-    env:
-      # Broken intra-doc links are now a hard error — v1 exits the
-      # "allow everything" era. Every member re-export uses
-      # absolute `[`crate::X`]` paths so facade inlining resolves
-      # cleanly.
-      RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --workspace --all-features --no-deps
-
-  bench-compile:
-    name: cargo bench --no-run (workspace)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo bench --workspace --no-run
-
-  examples:
-    name: cargo build --examples (workspace)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace --examples --all-features
-
-  publish-dry-run:
-    name: cargo publish --dry-run (anomstream-core)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # Only core can dry-run before first publication — triage /
-      # hotpath / meta depend on `anomstream-core` by version
-      # string and cargo's dry-run resolves that against crates.io,
-      # which rejects until core has actually been published once.
-      # After the first publish, enable the full chain here (order
-      # matters: core → triage → hotpath → anomstream facade).
-      - run: cargo publish --dry-run -p anomstream-core --allow-dirty
-
-  audit:
-    name: cargo audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-  deny:
-    name: cargo deny
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
-          arguments: --all-features
-
-  machete:
-    name: cargo machete (unused deps)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: bnjbvr/cargo-machete@v0.9.2
-
-  sbom:
-    name: CycloneDX SBOM (workspace)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo install --locked cargo-cyclonedx
-      - run: cargo cyclonedx --format json --all-features
-      - uses: actions/upload-artifact@v7
-        with:
-          name: sbom-cyclonedx
-          path: "**/*.cdx.json"
-          if-no-files-found: error
+  security:
+    name: Security
+    uses: ./.github/workflows/security.yml
+    permissions:
+      contents: read

@@ -1,0 +1,15 @@
+name: cargo clippy
+description: Run clippy with -D warnings on the supplied scope.
+
+inputs:
+  scope:
+    description: "Cargo scope flags (e.g. '--workspace --all-targets --all-features')."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SCOPE: ${{ inputs.scope }}
+      run: cargo clippy $SCOPE -- -D warnings

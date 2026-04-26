@@ -1,0 +1,61 @@
+name: Build
+
+# Reusable family workflow — cargo doc (strict intra-doc links),
+# bench compile, examples build.
+#
+# Called from `ci.yml` (weekly) and `release.yml` (per tag).
+# Standalone via `workflow_dispatch`.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "If set, stamp this version into Cargo.toml + README before building."
+        type: string
+        required: false
+        default: ""
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  doc:
+    name: cargo doc (workspace, strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - if: inputs.version != ''
+        uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ inputs.version }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-doc
+
+  bench-compile:
+    name: cargo bench --no-run (workspace, --all-features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - if: inputs.version != ''
+        uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ inputs.version }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-bench-compile
+
+  examples:
+    name: cargo build --examples (workspace, --all-features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - if: inputs.version != ''
+        uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ inputs.version }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-examples-build

@@ -1,0 +1,8 @@
+name: cargo fmt --check
+description: Run rustfmt across the workspace and fail on diffs.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: cargo fmt --all -- --check

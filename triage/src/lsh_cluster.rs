@@ -23,7 +23,7 @@
 //! hash and is **not** designed to resist an attacker who can
 //! probe many alerts and learn the per-instance seed. The hash is
 //! seeded with a random `u128` at construction
-//! ([`LshAlertClusterer::new`] / [`Self::default_lsh`]) so an
+//! ([`LshAlertClusterer::new`] / [`LshAlertClusterer::default_lsh`]) so an
 //! attacker who only sees a black-box clusterer cannot trivially
 //! craft attribution vectors that collide and collapse distinct
 //! alerts into a single bucket — the seed rotates each instance,
