@@ -23,7 +23,7 @@ workspace = true
 # under the `full` convenience feature for callers who want the
 # old behaviour without enumerating flags.
 default = ["core", "std"]
-full = ["core", "triage", "hotpath", "std", "parallel", "serde", "postcard"]
+full = ["core", "triage", "hotpath", "std", "parallel", "serde", "postcard", "serde_json"]
 core = ["dep:anomstream-core"]
 triage = ["dep:anomstream-triage", "core"]
 hotpath = ["dep:anomstream-hotpath", "core", "std"]
