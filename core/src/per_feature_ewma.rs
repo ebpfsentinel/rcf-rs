@@ -45,6 +45,7 @@ pub struct EwmaAccumulator {
 
 impl EwmaAccumulator {
     /// Fresh accumulator — zeroed.
+    #[inline]
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -55,6 +56,7 @@ impl EwmaAccumulator {
     }
 
     /// Ingest `value` under decay factor `alpha`.
+    #[inline]
     pub fn update(&mut self, value: f64, alpha: f64) {
         if self.count == 0 {
             self.mean = value;
@@ -70,6 +72,7 @@ impl EwmaAccumulator {
     /// `|value − mean| / sqrt(variance)`. Returns `f64::MAX`
     /// when variance is effectively zero and the observation
     /// diverges from the mean (perfectly stable baseline broken).
+    #[inline]
     #[must_use]
     pub fn z_score(&self, value: f64) -> f64 {
         let diff = (value - self.mean).abs();
@@ -82,6 +85,7 @@ impl EwmaAccumulator {
     }
 
     /// Reset to the zero state.
+    #[inline]
     pub fn reset(&mut self) {
         self.mean = 0.0;
         self.variance = 0.0;
@@ -90,6 +94,7 @@ impl EwmaAccumulator {
 }
 
 impl Default for EwmaAccumulator {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
@@ -195,6 +200,7 @@ mod serde_accumulators {
 
 impl<const D: usize> PerFeatureEwma<D> {
     /// Build an empty detector.
+    #[inline]
     #[must_use]
     pub const fn new(config: PerFeatureEwmaConfig) -> Self {
         Self {
@@ -205,18 +211,21 @@ impl<const D: usize> PerFeatureEwma<D> {
     }
 
     /// Active configuration.
+    #[inline]
     #[must_use]
     pub const fn config(&self) -> &PerFeatureEwmaConfig {
         &self.config
     }
 
     /// Observations ingested so far.
+    #[inline]
     #[must_use]
     pub const fn total_samples(&self) -> u64 {
         self.total_samples
     }
 
     /// `true` once `total_samples ≥ warmup_samples`.
+    #[inline]
     #[must_use]
     pub const fn is_warmed_up(&self) -> bool {
         self.total_samples >= self.config.warmup_samples as u64
@@ -225,6 +234,7 @@ impl<const D: usize> PerFeatureEwma<D> {
     /// Per-dimension accumulator snapshot (useful for status
     /// endpoints and debugging; callers should not mutate in
     /// place — use [`Self::reset`] instead).
+    #[inline]
     #[must_use]
     pub const fn accumulators(&self) -> &[EwmaAccumulator; D] {
         &self.accumulators
@@ -233,6 +243,7 @@ impl<const D: usize> PerFeatureEwma<D> {
     /// Ingest `input`, returning the per-feature z-scores *iff*
     /// warmup is complete. Accumulators are always updated so a
     /// disabled caller can still warm the detector.
+    #[inline]
     #[must_use = "detector output should be checked — dropping it silently usually indicates a logic bug"]
     pub fn observe(&mut self, input: &[f64; D]) -> Option<PerFeatureEwmaResult<D>> {
         let result = if self.is_warmed_up() {
@@ -258,6 +269,7 @@ impl<const D: usize> PerFeatureEwma<D> {
     }
 
     /// Zero every accumulator and the sample counter.
+    #[inline]
     pub fn reset(&mut self) {
         for acc in &mut self.accumulators {
             acc.reset();

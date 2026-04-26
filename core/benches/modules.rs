@@ -521,6 +521,39 @@ fn bench_per_feature_ewma(c: &mut Criterion) {
         });
     });
 
+    // Standalone micro-fn benches — measure the per-call cost of
+    // `EwmaAccumulator::update` and `z_score` after the
+    // cross-crate-boundary `#[inline]` hints. The values are tiny
+    // (a few ns each) and are sensitive to inlining: regression
+    // here usually means a `#[inline]` was dropped or a wrapper
+    // was inserted that the compiler did not see through.
+    group.bench_function("accumulator_update_micro", |b| {
+        let mut acc = anomstream_core::EwmaAccumulator::new();
+        // Warm so the count == 0 branch does not dominate.
+        for i in 0..32_u32 {
+            acc.update(f64::from(i), 0.1);
+        }
+        let mut x = 0.0_f64;
+        b.iter(|| {
+            x += 0.5;
+            acc.update(black_box(x), black_box(0.1));
+            black_box(&acc);
+        });
+    });
+
+    group.bench_function("accumulator_z_score_micro", |b| {
+        let mut acc = anomstream_core::EwmaAccumulator::new();
+        for i in 0..256_u32 {
+            acc.update(f64::from(i % 13), 0.1);
+        }
+        let mut x = 0.0_f64;
+        b.iter(|| {
+            x += 0.25;
+            let z = acc.z_score(black_box(x));
+            black_box(z);
+        });
+    });
+
     group.finish();
 }
 

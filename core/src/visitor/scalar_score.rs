@@ -47,6 +47,7 @@ pub struct ScalarScoreVisitor {
 impl ScalarScoreVisitor {
     /// Build a fresh visitor for a tree whose root holds `total_mass`
     /// distinct leaves (counting duplicates via leaf mass).
+    #[inline]
     #[must_use]
     pub fn new(total_mass: u64) -> Self {
         Self {
@@ -57,12 +58,14 @@ impl ScalarScoreVisitor {
 
     /// Read-only access to the accumulated raw score before
     /// normalisation. Used by tests and diagnostics.
+    #[inline]
     #[must_use]
     pub fn accumulated(&self) -> f64 {
         self.accumulated
     }
 
     /// Tree-wide leaf-mass total this visitor was built with.
+    #[inline]
     #[must_use]
     pub fn total_mass(&self) -> u64 {
         self.total_mass
@@ -72,6 +75,7 @@ impl ScalarScoreVisitor {
 impl<const D: usize> Visitor<D> for ScalarScoreVisitor {
     type Output = AnomalyScore;
 
+    #[inline]
     fn accept_internal(
         &mut self,
         depth: usize,
@@ -86,12 +90,14 @@ impl<const D: usize> Visitor<D> for ScalarScoreVisitor {
         self.accumulated += blend * damp(mass, self.total_mass);
     }
 
+    #[inline]
     fn accept_leaf(&mut self, depth: usize, mass: u64, _point_idx: usize) {
         // The queried point matched this leaf — contribute as a
         // "seen" point (no isolation probability at the leaf).
         self.accumulated += score_seen(depth, mass) * damp(mass, self.total_mass);
     }
 
+    #[inline]
     fn result(self) -> AnomalyScore {
         let norm = normalizer(self.total_mass);
         let score = if norm > 0.0 {
